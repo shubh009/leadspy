@@ -4,10 +4,13 @@ import ChatCanvas from './components/ChatCanvas';
 import RightHistory from './components/RightHistory';
 import LeadsCRMView from './components/LeadsCRMView';
 import CampaignsView from './components/CampaignsView';
+import LoginView from './components/LoginView';
 import { INITIAL_CAMPAIGNS, MOCK_LEADS, INITIAL_CHAT_MESSAGES, enrichLead } from './data/mockData';
 import { sendChatMessage, triggerScrape, fetchCampaigns, fetchLeads, updateLeadStatus } from './services/api';
+import { getStoredUser, logoutUser } from './services/authService';
 
 function App() {
+  const [currentUser, setCurrentUser] = useState(() => getStoredUser());
   const [activeNav, setActiveNav] = useState('chat'); // 'chat' | 'campaigns' | 'leads'
   const [campaigns, setCampaigns] = useState(INITIAL_CAMPAIGNS);
   const [activeCampaignId, setActiveCampaignId] = useState(null);
@@ -293,12 +296,28 @@ function App() {
     }
   };
 
+  // If user is not logged in, render the reference-style Login Panel
+  if (!currentUser) {
+    return (
+      <LoginView 
+        onLoginSuccess={(user) => setCurrentUser(user)} 
+      />
+    );
+  }
+
+  const handleLogout = () => {
+    logoutUser();
+    setCurrentUser(null);
+  };
+
   return (
     <div className="flex h-screen w-screen bg-[#14151b] overflow-hidden">
-      {/* 1. Left Dark Sidebar with Leads & CRM menu */}
+      {/* 1. Left Dark Sidebar with Leads & CRM menu & User Profile */}
       <Sidebar 
         activeNav={activeNav} 
         leadsCount={crmLeads.length}
+        currentUser={currentUser}
+        onLogout={handleLogout}
         onNavChange={(nav) => {
           setActiveNav(nav);
           if (nav === 'chat' && messages.length === 0) handleNewChat();
