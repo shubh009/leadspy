@@ -2,7 +2,8 @@
  * LeadSpy IT Project Discovery Engine API Client
  */
 
-const API_BASE = '/api/projects';
+const API_ROOT = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050/api';
+const API_BASE = `${API_ROOT}/projects`;
 
 export async function fetchProjects(params = {}) {
   const query = new URLSearchParams();
