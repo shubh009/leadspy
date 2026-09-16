@@ -1,13 +1,15 @@
-import { RedditAdapter } from '../adapters/redditAdapter.js';
+import { IndiaProjectsAdapter } from '../adapters/indiaProjectsAdapter.js';
 import { HackerNewsAdapter } from '../adapters/hackerNewsAdapter.js';
-import { GoogleDorkAdapter } from '../adapters/googleDorkAdapter.js';
 import { RemoteOkAdapter } from '../adapters/remoteOkAdapter.js';
+import { RedditAdapter } from '../adapters/redditAdapter.js';
+import { GoogleDorkAdapter } from '../adapters/googleDorkAdapter.js';
 import { ProjectClassifier } from '../ai/projectClassifier.js';
 import { saveMasterProjects } from './projectDbService.js';
 
 export class DiscoveryService {
   constructor() {
     this.adapters = [
+      new IndiaProjectsAdapter(),
       new HackerNewsAdapter(),
       new RemoteOkAdapter(),
       new RedditAdapter(),

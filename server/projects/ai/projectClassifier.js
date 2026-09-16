@@ -107,6 +107,11 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
    * Deterministic Heuristic Extractor (Works 100% offline with zero latency)
    */
   heuristicQualification(candidate) {
+    // 1. Reject non-tech corporate roles & non-project corporate jobs
+    if (/payroll|student assistant|recruiter|hr manager|receptionist|accountant|fashion communication|garment draping|business development manager/i.test(candidate.rawTitle)) {
+      return null;
+    }
+
     const text = `${candidate.rawTitle} ${candidate.rawContent}`;
     const lower = text.toLowerCase();
 
@@ -138,13 +143,38 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     const emailMatch = text.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+)/i);
     const clientEmail = emailMatch ? emailMatch[1] : null;
 
-    // Budget extraction
+    // Location detection (Supporting India & Indian Metros)
+    let clientLocation = 'Global / Remote';
+    if (/india|delhi|bangalore|bengaluru|mumbai|pune|hyderabad|noida|gurugram|gurgaon|surat|chennai/i.test(text)) {
+      if (/delhi|noida|gurugram|gurgaon/i.test(text)) clientLocation = 'Delhi NCR, India';
+      else if (/bangalore|bengaluru/i.test(text)) clientLocation = 'Bangalore, India';
+      else if (/mumbai/i.test(text)) clientLocation = 'Mumbai, India';
+      else if (/pune/i.test(text)) clientLocation = 'Pune, India';
+      else if (/hyderabad/i.test(text)) clientLocation = 'Hyderabad, India';
+      else clientLocation = 'India (Remote)';
+    } else if (text.includes('USA') || text.includes('US') || text.includes('America')) {
+      clientLocation = 'USA';
+    } else if (text.includes('UK') || text.includes('London')) {
+      clientLocation = 'UK';
+    } else if (text.includes('Canada')) {
+      clientLocation = 'Canada';
+    }
+
+    // Budget & Currency extraction (USD & INR)
     let budget = null;
     let budgetMin = null;
     let budgetMax = null;
+    let currency = 'USD';
+
+    const inrMatch = text.match(/₹\s*[\d,]+(\s*-\s*₹\s*[\d,]+)?/i) || text.match(/INR\s*[\d,]+/i) || text.match(/[\d.]+\s*Lakh/i);
     const budgetMatch = text.match(/\$[\d,]+(\s*-\s*\$[\d,]+)?/);
-    if (budgetMatch) {
+
+    if (inrMatch) {
+      budget = inrMatch[0];
+      currency = 'INR';
+    } else if (budgetMatch) {
       budget = budgetMatch[0];
+      currency = 'USD';
       const nums = budget.replace(/\$/g, '').replace(/,/g, '').split('-').map(n => parseFloat(n.trim())).filter(Boolean);
       if (nums.length === 1) {
         budgetMin = nums[0];
@@ -170,20 +200,20 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       originalDescription: candidate.rawContent,
       category,
       skills: detectedSkills.length > 0 ? detectedSkills : ['Full Stack', 'Web'],
-      features: ['MVP Architecture', 'Custom Integration'],
-      clientName: candidate.author || 'Project Owner',
+      features: ['Custom Deliverables', 'Project Milestones'],
+      clientName: candidate.author || 'Client',
       clientUsername: candidate.author,
       clientEmail,
       clientProfileUrl: candidate.authorProfileUrl,
       clientContactMethod: contactMethod,
-      clientLocation: text.includes('USA') ? 'USA' : (text.includes('UK') ? 'UK' : 'Global / Remote'),
+      clientLocation,
       budget: budget || 'Negotiable',
       budgetMin,
       budgetMax,
-      currency: 'USD',
-      projectType: budget ? 'Fixed Price' : 'Contract',
-      intent: 'Looking for Developer',
-      relevanceScore: 85,
+      currency,
+      projectType: budget ? 'Fixed Milestone' : 'Contract / Gig',
+      intent: 'Looking for Agency / Developer',
+      relevanceScore: 90,
       postedAt: candidate.postedAt,
       discoveredAt: new Date().toISOString()
     };

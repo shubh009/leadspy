@@ -38,11 +38,19 @@ const FRESHNESS_OPTIONS = [
   { id: '7d', label: 'This Week' },
 ];
 
+const LOCATION_OPTIONS = [
+  { id: '', label: 'All Regions' },
+  { id: 'India', label: '🇮🇳 India' },
+  { id: 'USA', label: '🇺🇸 USA' },
+  { id: 'UK', label: '🇬🇧 UK' },
+  { id: 'Remote', label: '🌐 Remote' },
+];
+
 const SUGGESTED_QUERIES = [
-  'React & Next.js projects posted today',
-  'Mobile app projects under $5,000',
-  'UI/UX design for AI SaaS',
-  'Python & AI automation gigs'
+  '🇮🇳 React & Node projects in India',
+  '📱 Flutter apps in Bangalore / Delhi',
+  '🇺🇸 Next.js MVPs under $5,000',
+  '🎨 UI/UX redesign gigs'
 ];
 
 export default function ProjectsView() {
@@ -56,6 +64,7 @@ export default function ProjectsView() {
   // Search & Filters State
   const [nlQuery, setNlQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState('all');
+  const [activeLocation, setActiveLocation] = useState('');
   const [activeFreshness, setActiveFreshness] = useState('');
   const [activeTechFilter, setActiveTechFilter] = useState('');
   const [appliedChips, setAppliedChips] = useState([]);
@@ -73,6 +82,7 @@ export default function ProjectsView() {
     try {
       const res = await fetchProjects({
         category: activeCategory,
+        location: activeLocation,
         tech: activeTechFilter,
         freshness: activeFreshness,
         limit: 24
@@ -103,7 +113,7 @@ export default function ProjectsView() {
   useEffect(() => {
     loadProjects();
     loadSaved();
-  }, [activeCategory, activeFreshness, activeTechFilter]);
+  }, [activeCategory, activeLocation, activeFreshness, activeTechFilter]);
 
   // Handle Natural Language Search
   const handleNLSearch = async (e) => {
@@ -168,6 +178,7 @@ export default function ProjectsView() {
   const clearFilters = () => {
     setNlQuery('');
     setActiveCategory('all');
+    setActiveLocation('');
     setActiveFreshness('');
     setActiveTechFilter('');
     setAppliedChips([]);
@@ -302,10 +313,49 @@ export default function ProjectsView() {
             </div>
 
             {/* Filter Bar & Chips */}
-            <div className="flex items-center justify-between gap-4 pt-2 border-t border-white/5 flex-wrap">
+            <div className="space-y-2 pt-2 border-t border-white/5">
               
-              {/* Category Pills */}
+              {/* Row 1: Region / Location Selector & Freshness */}
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-[11px] text-gray-400 font-medium mr-1">Region:</span>
+                  {LOCATION_OPTIONS.map((loc) => (
+                    <button
+                      key={loc.id}
+                      onClick={() => setActiveLocation(loc.id)}
+                      className={`px-3 py-1 rounded-xl text-xs font-medium transition cursor-pointer ${
+                        activeLocation === loc.id
+                          ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                          : 'bg-[#181a25] text-gray-400 hover:text-gray-200 border border-white/5'
+                      }`}
+                    >
+                      {loc.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Freshness Filter */}
+                <div className="flex items-center gap-1 text-xs">
+                  <Clock className="w-3.5 h-3.5 text-gray-400" />
+                  {FRESHNESS_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.id}
+                      onClick={() => setActiveFreshness(opt.id)}
+                      className={`px-2.5 py-1 rounded-lg transition ${
+                        activeFreshness === opt.id
+                          ? 'bg-white/10 text-white font-semibold'
+                          : 'text-gray-400 hover:text-gray-300'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Row 2: Category Pills */}
               <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[11px] text-gray-400 font-medium mr-1">Category:</span>
                 {CATEGORIES.map((cat) => (
                   <button
                     key={cat.id}
@@ -317,24 +367,6 @@ export default function ProjectsView() {
                     }`}
                   >
                     {cat.label}
-                  </button>
-                ))}
-              </div>
-
-              {/* Freshness Filter */}
-              <div className="flex items-center gap-1 text-xs">
-                <Clock className="w-3.5 h-3.5 text-gray-400" />
-                {FRESHNESS_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.id}
-                    onClick={() => setActiveFreshness(opt.id)}
-                    className={`px-2.5 py-1 rounded-lg transition ${
-                      activeFreshness === opt.id
-                        ? 'bg-white/10 text-white font-semibold'
-                        : 'text-gray-400 hover:text-gray-300'
-                    }`}
-                  >
-                    {opt.label}
                   </button>
                 ))}
               </div>
