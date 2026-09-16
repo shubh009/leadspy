@@ -5,13 +5,14 @@ import RightHistory from './components/RightHistory';
 import LeadsCRMView from './components/LeadsCRMView';
 import CampaignsView from './components/CampaignsView';
 import LoginView from './components/LoginView';
+import ProjectsView from './components/projects/ProjectsView';
 import { INITIAL_CAMPAIGNS, MOCK_LEADS, INITIAL_CHAT_MESSAGES, enrichLead } from './data/mockData';
 import { sendChatMessage, triggerScrape, fetchCampaigns, fetchLeads, updateLeadStatus } from './services/api';
 import { getStoredUser, logoutUser } from './services/authService';
 
 function App() {
   const [currentUser, setCurrentUser] = useState(() => getStoredUser());
-  const [activeNav, setActiveNav] = useState('chat'); // 'chat' | 'campaigns' | 'leads'
+  const [activeNav, setActiveNav] = useState('chat'); // 'chat' | 'projects' | 'campaigns' | 'leads'
   const [campaigns, setCampaigns] = useState(INITIAL_CAMPAIGNS);
   const [activeCampaignId, setActiveCampaignId] = useState(null);
   const [messages, setMessages] = useState(INITIAL_CHAT_MESSAGES);
@@ -325,7 +326,9 @@ function App() {
       />
 
       {/* 2. Main Central View */}
-      {activeNav === 'campaigns' ? (
+      {activeNav === 'projects' ? (
+        <ProjectsView />
+      ) : activeNav === 'campaigns' ? (
         <CampaignsView 
           campaigns={campaigns}
           onSelectCampaign={(camp) => {

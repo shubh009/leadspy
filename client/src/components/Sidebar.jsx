@@ -10,12 +10,14 @@ import {
   LogOut, 
   Sparkles, 
   Compass,
-  Zap
+  Zap,
+  Code2
 } from 'lucide-react';
 
 export default function Sidebar({ activeNav = 'chat', onNavChange, leadsCount = 0, currentUser = null, onLogout }) {
   const navItems = [
     { id: 'chat', label: 'AI Lead Finder', icon: Bot, isPro: false },
+    { id: 'projects', label: 'IT Project Radar', icon: Code2, isPro: false, badge: 'NEW' },
     { id: 'campaigns', label: 'Lead Campaigns', icon: FolderKanban, isPro: false },
     { id: 'leads', label: 'Leads & CRM', icon: Users, isPro: false, badge: leadsCount > 0 ? leadsCount : null },
     { id: 'statistics', label: 'Analytics', icon: BarChart3, isPro: true },
