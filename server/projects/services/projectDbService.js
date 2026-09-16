@@ -47,7 +47,6 @@ export async function saveMasterProjects(projects = []) {
       status: 'active'
     };
 
-    // Update In-Memory cache
     const existingIdx = IN_MEMORY_PROJECTS.findIndex(item => item.source_url === record.source_url);
     if (existingIdx >= 0) {
       IN_MEMORY_PROJECTS[existingIdx] = { ...IN_MEMORY_PROJECTS[existingIdx], ...record, id: IN_MEMORY_PROJECTS[existingIdx].id };
@@ -56,17 +55,59 @@ export async function saveMasterProjects(projects = []) {
       IN_MEMORY_PROJECTS.unshift(record);
       insertedCount++;
     }
+  }
 
-    // Attempt Supabase upsert (non-blocking)
-    try {
-      if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY) {
-        await supabase
-          .from('master_projects')
-          .upsert(record, { onConflict: 'source_url' });
+  // Batch Upsert to Supabase in ONE single fast query
+  try {
+    if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY && projects.length > 0) {
+      const seen = new Set();
+      const recordsToUpsert = [];
+
+      for (const p of IN_MEMORY_PROJECTS) {
+        const cid = `proj-${Buffer.from(p.source_url || p.title).toString('base64').replace(/=/g, '').substring(0, 50)}`;
+        if (!seen.has(cid)) {
+          seen.add(cid);
+          recordsToUpsert.push({
+            canonical_id: cid,
+            source: p.source,
+            source_url: p.source_url,
+            source_post_id: p.source_post_id,
+            title: p.title,
+            short_summary: p.short_summary,
+            original_description: p.original_description,
+            category: p.category,
+            skills: p.skills,
+            features: p.features,
+            client_name: p.client_name,
+            client_username: p.client_username,
+            client_email: p.client_email,
+            client_profile_url: p.client_profile_url,
+            client_contact_method: p.client_contact_method,
+            client_location: p.client_location,
+            budget: p.budget,
+            currency: p.currency,
+            project_type: p.project_type,
+            intent: p.intent,
+            relevance_score: p.relevance_score,
+            posted_at: p.posted_at,
+            discovered_at: p.discovered_at,
+            status: 'active'
+          });
+        }
       }
-    } catch (err) {
-      // Keep running with in-memory persistence
+
+      const { error } = await supabase
+        .from('master_projects')
+        .upsert(recordsToUpsert, { onConflict: 'canonical_id' });
+
+      if (error) {
+        console.warn('Supabase batch upsert warning:', error.message);
+      } else {
+        console.log(`✅ Upserted ${recordsToUpsert.length} unique live projects to Supabase.`);
+      }
     }
+  } catch (err) {
+    console.warn('Supabase sync notice:', err.message);
   }
 
   return { inserted: insertedCount, total: IN_MEMORY_PROJECTS.length };
