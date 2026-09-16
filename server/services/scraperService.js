@@ -175,9 +175,11 @@ export async function scrapeGoogleMaps(query = 'Real Estate Agencies in Agra', f
     finalLeads.map(async (lead) => {
       try {
         const contacts = await findLeadContacts(lead);
+        const resolvedEmail = contacts.email || lead.email || null;
         return {
           ...lead,
-          email: contacts.email || null,
+          phone: maskPhoneNumber(lead.phone),
+          email: resolvedEmail ? maskEmail(resolvedEmail) : null,
           instagram: contacts.instagram || null,
           facebook: contacts.facebook || null,
           linkedin: contacts.linkedin || null
@@ -185,7 +187,8 @@ export async function scrapeGoogleMaps(query = 'Real Estate Agencies in Agra', f
       } catch (err) {
         return {
           ...lead,
-          email: null,
+          phone: maskPhoneNumber(lead.phone),
+          email: lead.email ? maskEmail(lead.email) : null,
           instagram: null,
           facebook: null,
           linkedin: null
@@ -226,36 +229,76 @@ export async function scrapeGoogleMaps(query = 'Real Estate Agencies in Agra', f
   return enrichedLeads;
 }
 
+export function maskPhoneNumber(phone) {
+  if (!phone || typeof phone !== 'string') return '+91 98*** ***10';
+  const clean = phone.trim();
+  const digits = clean.replace(/\D/g, '');
+  if (digits.length >= 10) {
+    const last10 = digits.slice(-10);
+    return `+91 ${last10.slice(0, 2)}*** ***${last10.slice(-2)}`;
+  } else if (digits.length >= 6) {
+    return `${digits.slice(0, 2)}*** ***${digits.slice(-2)}`;
+  }
+  return '+91 98*** ***10';
+}
+
+export function maskEmail(email) {
+  if (!email || typeof email !== 'string') return null;
+  const clean = email.trim();
+  const atIndex = clean.indexOf('@');
+  if (atIndex <= 0) return clean;
+
+  const username = clean.slice(0, atIndex);
+  const domain = clean.slice(atIndex); // includes '@domain.com'
+
+  const visibleChars = Math.min(2, username.length);
+  const maskedUser = username.slice(0, visibleChars) + '*****';
+
+  return `${maskedUser}${domain}`;
+}
+
 function formatLeadWithIntelligence(raw) {
-  const hasWebsite = Boolean(raw.website && raw.website.trim() !== '');
+  const hasWebsite = Boolean(raw.website && raw.website.trim() !== '' && raw.website !== 'None');
   const isLowRating = raw.rating < 4.2;
   const isHighReviews = raw.reviewsCount > 50;
 
   let opportunityScore = 'Medium';
   let opportunityTag = 'Active Profile';
+  let listingIssue = '';
   let aiPitch = '';
 
   if (!hasWebsite) {
     opportunityScore = 'Immediate (High Intent)';
     opportunityTag = '⚠️ No Website (Pitch Web Dev & Portfolio)';
-    aiPitch = `Hey ${raw.name}, you have ${raw.reviewsCount} Google reviews with a ${raw.rating}★ rating in ${raw.address || 'your city'}, but no official website to showcase listings or book client visits directly.`;
+    listingIssue = `No Official Website: Business lacks a direct booking or portfolio landing page. Potential clients in ${raw.address || 'the locality'} are losing confidence or choosing competitors with direct online booking.`;
+    aiPitch = `Hey ${raw.name}, you have ${raw.reviewsCount} Google reviews with a ${raw.rating}★ rating, but no official website to showcase listings directly. We build high-converting landing pages in 48 hours to capture direct client inquiries.`;
   } else if (isLowRating) {
     opportunityScore = 'High';
     opportunityTag = '⭐ Reputation & Review Booster';
-    aiPitch = `Hi ${raw.name}, saw your listing on Google Maps. We help local businesses elevate ${raw.rating}★ ratings to 4.8★+ within 30 days.`;
+    listingIssue = `Low Google Rating (${raw.rating}★): Negative reviews and low average score are hurting local customer trust and lowering Google Maps search ranking.`;
+    aiPitch = `Hi ${raw.name}, saw your listing on Google Maps. We help local businesses elevate ${raw.rating}★ ratings to 4.8★+ within 30 days and repair reputation damage.`;
+  } else if (!raw.claimed) {
+    opportunityScore = 'High';
+    opportunityTag = '📍 Unclaimed Profile (GMB Setup)';
+    listingIssue = `Unclaimed Google Profile: This listing is unverified and at risk of competitor edits, missing out on local 3-pack search traffic.`;
+    aiPitch = `Hi ${raw.name}, noticed your Google Maps listing is currently unclaimed. We can claim, verify, and fully optimize it to protect your brand and rank top 3 locally.`;
   } else if (isHighReviews) {
     opportunityScore = 'High';
     opportunityTag = '🚀 High Authority (Pitch Paid Ads)';
-    aiPitch = `Hello ${raw.name}! You lead your area with ${raw.reviewsCount} reviews. We can run high-ROI ads to dominate the top 3 Google local map spots.`;
+    listingIssue = `High Authority, Under-Monetized: Strong local reputation (${raw.reviewsCount} reviews) but missing targeted Google Map Ads & retargeting funnels to capture maximum market share.`;
+    aiPitch = `Hello ${raw.name}! You lead your area with ${raw.reviewsCount} reviews. We can run high-ROI local ads to dominate the top 3 Google local map spots and scale bookings.`;
   } else {
-    aiPitch = `Hi ${raw.name}, noticed your Google Maps listing. We help ${raw.category} firms scale client inquiries by 35%.`;
+    listingIssue = `Standard Profile Presence: Active listing without high-converting sales funnels or automated follow-up systems.`;
+    aiPitch = `Hi ${raw.name}, noticed your Google Maps listing. We help ${raw.category} firms scale client inquiries by 35% using local SEO and client acquisition funnels.`;
   }
 
   return {
     ...raw,
-    email: raw.email || null,
+    phone: maskPhoneNumber(raw.phone),
+    email: raw.email ? maskEmail(raw.email) : null,
     opportunityScore,
     opportunityTag,
+    listingIssue,
     aiPitch
   };
 }

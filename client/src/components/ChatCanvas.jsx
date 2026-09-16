@@ -25,10 +25,36 @@ import {
   Loader2,
   Mail,
   Users,
-  Trash2
+  Trash2,
+  AlertTriangle
 } from 'lucide-react';
 import LeadOverviewDrawer from './LeadOverviewDrawer';
 import DeleteConfirmModal from './DeleteConfirmModal';
+
+function formatMaskedPhone(phone) {
+  if (!phone || typeof phone !== 'string') return '+91 98*** ***10';
+  if (phone.includes('***')) return phone;
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length >= 10) {
+    const last10 = digits.slice(-10);
+    return `+91 ${last10.slice(0, 2)}*** ***${last10.slice(-2)}`;
+  } else if (digits.length >= 6) {
+    return `${digits.slice(0, 2)}*** ***${digits.slice(-2)}`;
+  }
+  return '+91 98*** ***10';
+}
+
+function formatMaskedEmail(email) {
+  if (!email || typeof email !== 'string') return null;
+  if (email.includes('*****')) return email;
+  const clean = email.trim();
+  const atIndex = clean.indexOf('@');
+  if (atIndex <= 0) return clean;
+  const username = clean.slice(0, atIndex);
+  const domain = clean.slice(atIndex);
+  const prefix = username.slice(0, Math.min(2, username.length));
+  return `${prefix}*****${domain}`;
+}
 
 export default function ChatCanvas({ 
   messages = [], 
@@ -689,7 +715,11 @@ export default function ChatCanvas({
                   {leads.map((lead) => (
                     <div 
                       key={lead.id}
-                      className="p-4 rounded-2xl border border-gray-100 bg-[#fbfbfe] hover:bg-white hover:border-orange-200/80 hover:shadow-md hover:shadow-orange-500/5 transition group flex flex-col justify-between"
+                      onClick={() => {
+                        setSelectedLead(lead);
+                        setIsDrawerOpen(true);
+                      }}
+                      className="p-4 rounded-2xl border border-gray-100 bg-[#fbfbfe] hover:bg-white hover:border-orange-200/80 hover:shadow-md hover:shadow-orange-500/5 transition group flex flex-col justify-between cursor-pointer"
                     >
                       <div>
                         {/* Top Badges */}
@@ -697,90 +727,75 @@ export default function ChatCanvas({
                           <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-orange-50 text-orange-700 border border-orange-200/60">
                             {lead.category}
                           </span>
-                          <div className="flex items-center gap-1 text-xs font-semibold text-gray-800">
-                            <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                            <span>{lead.rating}</span>
-                            <span className="text-[10px] text-gray-400 font-normal">({lead.reviewsCount})</span>
+                          <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-1 text-xs font-semibold text-gray-800">
+                              <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                              <span>{lead.rating}</span>
+                              <span className="text-[10px] text-gray-400 font-normal">({lead.reviewsCount})</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setLeadToDelete(lead);
+                              }}
+                              className="p-1 text-gray-300 hover:text-rose-600 hover:bg-rose-50 rounded-md transition cursor-pointer"
+                              title="Remove Lead"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
                           </div>
                         </div>
 
                         {/* Business Name */}
-                        <h3 className="font-semibold text-gray-900 text-sm mb-1.5 group-hover:text-orange-600 transition">
+                        <h3 className="font-semibold text-gray-900 text-sm mb-2 group-hover:text-orange-600 transition">
                           {lead.name}
                         </h3>
 
-                        {/* Info details - Address removed from view as requested, preserved in JSON */}
-                        <div className="space-y-1.5 text-xs text-gray-500">
+                        {/* Contact details - Masked Phone & Email */}
+                        <div className="space-y-1.5 text-xs text-gray-500 mb-3">
                           <div className="flex items-center gap-2">
                             <Phone className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-                            <span className="font-mono text-gray-700">{lead.phone}</span>
+                            <span className="font-mono text-gray-700 font-medium">{formatMaskedPhone(lead.phone)}</span>
                           </div>
                           <div className="flex items-center gap-2">
                             <Mail className="w-3.5 h-3.5 text-gray-400 shrink-0" />
                             {lead.email ? (
-                              <a 
-                                href={`mailto:${lead.email}`}
-                                title="Send Email"
-                                className="font-mono text-orange-600 hover:text-orange-700 hover:underline truncate max-w-[240px]"
-                              >
-                                {lead.email}
-                              </a>
+                              <span className="font-mono text-gray-700 font-medium truncate max-w-[240px]">
+                                {formatMaskedEmail(lead.email)}
+                              </span>
                             ) : (
                               <span className="text-gray-400 text-[11px] italic">No public email found</span>
                             )}
                           </div>
                         </div>
 
-                        {/* AI Cold Pitch Angle */}
-                        <div className="mt-3 p-2.5 rounded-xl bg-amber-50/70 border border-amber-200/70 text-[11px] text-amber-900 leading-snug">
-                          <span className="font-semibold block text-amber-950 mb-0.5 flex items-center gap-1">
-                            <Sparkles className="w-3 h-3 text-amber-600" /> 
-                            AI Outreach Hook:
+                        {/* 1. Listing Issue / Problem Diagnosis */}
+                        <div className="p-3 rounded-2xl bg-rose-50/70 border border-rose-200/80 text-[11px] text-rose-950 leading-relaxed">
+                          <span className="font-bold text-rose-900 mb-1 flex items-center gap-1.5">
+                            <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                            Listing Issue Detected:
                           </span>
-                          {lead.aiPitch}
+                          <p className="text-rose-900/90 font-medium">
+                            {lead.listingIssue || (
+                              !lead.website || lead.website === 'None'
+                                ? `No Official Website: Business has ${lead.reviewsCount} reviews but lacks a direct booking landing page, losing local customers to competitors.`
+                                : lead.rating < 4.2
+                                ? `Low Rating (${lead.rating}★): Unfavorable reviews are harming customer acquisition and lowering Google Maps local visibility.`
+                                : 'Standard listing presence. Untapped opportunity for automated customer acquisition funnels.'
+                            )}
+                          </p>
                         </div>
-                      </div>
 
-                      {/* Footer Actions */}
-                      <div className="flex items-center justify-between pt-3 mt-3 border-t border-gray-100">
-                        {lead.website ? (
-                          <a 
-                            href={lead.website} 
-                            target="_blank" 
-                            rel="noreferrer" 
-                            className="flex items-center gap-1 text-xs font-medium text-blue-600 hover:underline"
-                          >
-                            <Globe className="w-3.5 h-3.5" />
-                            <span>Visit Website</span>
-                            <ExternalLink className="w-2.5 h-2.5 ml-0.5" />
-                          </a>
-                        ) : (
-                          <span className="text-[11px] font-medium text-rose-600 bg-rose-50 px-2 py-0.5 rounded border border-rose-200">
-                            ⚠️ No Website Detected
+                        {/* 2. Suggested AI Outreach Pitch */}
+                        <div className="mt-2.5 p-3 rounded-2xl bg-amber-50/70 border border-amber-200/80 text-[11px] text-amber-950 leading-relaxed">
+                          <span className="font-bold text-amber-900 mb-1 flex items-center gap-1.5">
+                            <Sparkles className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                            Suggested AI Outreach Pitch:
                           </span>
-                        )}
-
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setLeadToDelete(lead);
-                            }}
-                            className="p-1.5 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                            title="Remove Lead"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-
-                          <a 
-                            href={`https://wa.me/?text=${encodeURIComponent('Hi ' + lead.name + ', ' + lead.aiPitch)}`}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="px-2.5 py-1 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-xs font-medium transition shadow-2xs"
-                          >
-                            Contact
-                          </a>
+                          <p className="text-amber-900/90 font-medium">
+                            "{lead.aiPitch}"
+                          </p>
                         </div>
                       </div>
                     </div>
@@ -817,7 +832,7 @@ export default function ChatCanvas({
                             <span className="text-[10px] text-gray-400 font-normal">({l.company || l.category})</span>
                           </td>
                           <td className="p-3">⭐ {l.rating} ({l.reviewsCount})</td>
-                          <td className="p-3 font-mono">{l.phone}</td>
+                          <td className="p-3 font-mono">{formatMaskedPhone(l.phone)}</td>
                           <td className="p-3">
                             <span className="px-2 py-0.5 rounded bg-orange-50 text-orange-700 text-[10px] font-semibold border border-orange-200">
                               {l.opportunityTag}

@@ -534,6 +534,31 @@ export function enrichLead(rawLead, index = 0) {
     rawLead.claimed ? 'Verified business listing profile' : 'Unclaimed Google Business listing detected'
   ];
 
+function maskPhoneStr(phone) {
+  if (!phone || typeof phone !== 'string') return '+91 98*** ***10';
+  if (phone.includes('***')) return phone;
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length >= 10) {
+    const last10 = digits.slice(-10);
+    return `+91 ${last10.slice(0, 2)}*** ***${last10.slice(-2)}`;
+  } else if (digits.length >= 6) {
+    return `${digits.slice(0, 2)}*** ***${digits.slice(-2)}`;
+  }
+  return '+91 98*** ***10';
+}
+
+function maskEmailStr(email) {
+  if (!email || typeof email !== 'string') return null;
+  if (email.includes('*****')) return email;
+  const clean = email.trim();
+  const atIndex = clean.indexOf('@');
+  if (atIndex <= 0) return clean;
+  const username = clean.slice(0, atIndex);
+  const domain = clean.slice(atIndex);
+  const prefix = username.slice(0, Math.min(2, username.length));
+  return `${prefix}*****${domain}`;
+}
+
   const enriched = {
     id: rawLead.id || `lead-${Date.now()}-${index}`,
     name: rawLead.name || 'Prospect Company',
@@ -548,8 +573,16 @@ export function enrichLead(rawLead, index = 0) {
     assigned,
     nextAction: rawLead.nextAction || nextAction,
     aiRecommendation: rawLead.aiRecommendation || rawLead.opportunityTag || aiRecommendation,
-    email: rawLead.email || `${rawLead.name?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'contact'}@gmail.com`,
-    phone: rawLead.phone || '+91 98' + Math.floor(10000000 + Math.random() * 90000000),
+    listingIssue: rawLead.listingIssue || (
+      !hasWebsite
+        ? `No Official Website: Business has ${reviewsCount} reviews but lacks a direct booking landing page, losing local customers to competitors.`
+        : rating < 4.2
+        ? `Low Rating (${rating}★): Unfavorable reviews are harming customer acquisition and lowering Google Maps local visibility.`
+        : 'Standard listing presence. Untapped opportunity for automated customer acquisition funnels.'
+    ),
+    aiPitch: rawLead.aiPitch || `Hi ${rawLead.name}, noticed your listing on Google Maps. We help ${rawLead.category || 'local'} businesses scale customer inquiries by 35%.`,
+    email: rawLead.email ? maskEmailStr(rawLead.email) : maskEmailStr(`${rawLead.name?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'contact'}@gmail.com`),
+    phone: maskPhoneStr(rawLead.phone || '+91 98' + Math.floor(10000000 + Math.random() * 90000000)),
     location: rawLead.address || rawLead.location || 'India',
     website: rawLead.website || '',
     instagram: rawLead.instagram || null,
