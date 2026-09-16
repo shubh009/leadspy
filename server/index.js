@@ -37,17 +37,6 @@ app.listen(PORT, () => {
   console.log(`   - Scraper: POST http://localhost:${PORT}/api/scrape`);
   console.log(`   - Live SSE: GET http://localhost:${PORT}/api/scrape/stream`);
 
-  // Pre-seed and initial discovery crawl in background
-  discoveryService.runDiscovery().catch(err => {
-    console.warn('Initial project discovery sync notice:', err.message);
-  });
-
-  // Automated 15-minute periodic crawler
-  const CRAWL_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
-  setInterval(() => {
-    console.log('⏰ [Cron] Triggering 15-minute automated IT project crawl...');
-    discoveryService.runDiscovery().catch(err => {
-      console.warn('Automated crawl notice:', err.message);
-    });
-  }, CRAWL_INTERVAL_MS);
+  // Automated crawlers are currently paused for tuning & training.
+  // Can be manually triggered via /api/projects/sync-now when needed.
 });
