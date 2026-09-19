@@ -51,7 +51,7 @@ export default function ProjectCard({ project, onSelect, onSave, isSaved = false
         </p>
 
         {/* Skills Tags */}
-        <div className="flex flex-wrap gap-1.5 mb-4">
+        <div className="flex flex-wrap gap-1.5 mb-3">
           {project.skills && project.skills.slice(0, 4).map((skill, idx) => (
             <span 
               key={idx} 
@@ -65,6 +65,27 @@ export default function ProjectCard({ project, onSelect, onSave, isSaved = false
               +{project.skills.length - 4} more
             </span>
           )}
+        </div>
+
+        {/* Actionable Contact Route Badge (Section 20 UI Requirement) */}
+        <div className="flex items-center gap-1.5 mb-3">
+          {project.contactType === 'email' ? (
+            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-md">
+              ✓ Email available
+            </span>
+          ) : project.contactType === 'phone' ? (
+            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-md">
+              ✓ Direct phone available
+            </span>
+          ) : project.contactType === 'public_business_contact' || project.contactType === 'public_company_website' ? (
+            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded-md">
+              ✓ Public business contact
+            </span>
+          ) : project.contactType === 'public_profile_message' ? (
+            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-md">
+              ✓ Direct profile outreach
+            </span>
+          ) : null}
         </div>
       </div>
 

@@ -55,8 +55,12 @@ export class DiscoveryService {
           for (const cand of candidates) {
             try {
               const projectRecord = await this.classifier.qualifyAndExtract(cand);
-              if (projectRecord) {
+              if (projectRecord && projectRecord.qualification_status === 'qualified' && projectRecord.has_actionable_contact === true) {
                 qualifiedBatch.push(projectRecord);
+              } else {
+                // Log rejected candidate reason for debugging
+                const reason = projectRecord?.rejection_reason || 'UNQUALIFIED';
+                // console.debug(`[DiscoveryService] Candidate rejected [${reason}]: ${cand.rawTitle?.substring(0, 50)}`);
               }
             } catch (err) {
               console.warn(`[DiscoveryService] Error qualifying candidate ${cand.sourceUrl}:`, err.message);

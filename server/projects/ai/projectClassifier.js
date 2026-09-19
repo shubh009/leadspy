@@ -3,7 +3,8 @@ dotenv.config();
 
 /**
  * AI Project Classifier & Structured Entity Extractor
- * Uses OpenRouter LLM with intelligent heuristic backup.
+ * Enforces strict IT Project Qualification & Actionable Contactability
+ * Based on Project Discovery Engine Change Request Specification
  */
 export class ProjectClassifier {
   constructor() {
@@ -12,66 +13,105 @@ export class ProjectClassifier {
   }
 
   /**
+   * Sources explicitly excluded from project ingestion
+   */
+  static EXCLUDED_SOURCES = ['freelancer', 'guru', 'peopleperhour'];
+
+  /**
    * Qualify and parse a candidate post
    * @param {Object} candidate - Normalized candidate post
-   * @returns {Promise<Object|null>} - Returns structured project record or null if not IT project
+   * @returns {Promise<Object>} - Returns result object with qualification_status ('qualified' or 'rejected')
    */
   async qualifyAndExtract(candidate) {
-    // 1. Quick initial rejection of obvious non-leads / job seekers
-    const lowerTitle = (candidate.rawTitle || '').toLowerCase();
-    const lowerContent = (candidate.rawContent || '').toLowerCase();
-
-    if (lowerTitle.includes('[for hire]') || lowerTitle.startsWith('for hire:') || lowerTitle.includes('seeking work')) {
-      return null; // Competitor seeking work, discard immediately
+    if (!candidate) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'NO_PROJECT_REQUIREMENT',
+        is_client_side_project: false
+      };
     }
 
-    // 2. Try LLM Qualification if API Key exists
+    // 0. Excluded sources check (Section 9 & 15)
+    const sourceLower = (candidate.source || '').toLowerCase();
+    if (ProjectClassifier.EXCLUDED_SOURCES.some(s => sourceLower.includes(s))) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'SOURCE_NOT_ALLOWED',
+        is_client_side_project: false
+      };
+    }
+
+    // 1. Try LLM Qualification if API Key exists
     if (this.apiKey) {
       try {
         const llmResult = await this.callLLM(candidate);
-        if (llmResult && typeof llmResult.is_it_project === 'boolean') {
-          if (!llmResult.is_it_project) return null;
+        if (llmResult && typeof llmResult.qualification_status === 'string') {
           return this.formatExtractedProject(candidate, llmResult);
         }
       } catch (err) {
-        console.warn('[ProjectClassifier] LLM qualification fallback to heuristic:', err.message);
+        console.warn('[ProjectClassifier] LLM qualification failed, using strict heuristic fallback:', err.message);
       }
     }
 
-    // 3. Fallback Heuristic Classifier & Extractor
+    // 2. Deterministic Strict Heuristic Classifier & Extractor (Mirror of LLM rules)
     return this.heuristicQualification(candidate);
   }
 
   async callLLM(candidate) {
     const prompt = `
-You are an expert IT Project Evaluator.
-Analyze this public post and determine if it represents an actual IT/Software project requirement or hiring intent.
+You are an expert IT Project Qualification Agent.
+Evaluate whether this post represents a genuine CLIENT-SIDE IT/SOFTWARE PROJECT OPPORTUNITY that has an ACTIONABLE WAY TO REACH THE CLIENT/COMPANY.
 
-Post Title: "${candidate.rawTitle}"
-Author: "${candidate.author}"
-Source: "${candidate.source}"
-Content:
+STRICT REJECTION RULES (Check these first):
+1. EMPLOYMENT / JOBS: If the post is hiring full-time employees, salaried staff, CTC/LPA, permanent roles, notice period, resume submissions -> REJECT ("EMPLOYMENT").
+2. INTERNSHIP: If the post is for interns, trainees, stipend, freshers -> REJECT ("INTERNSHIP").
+3. FREELANCER SEEKING WORK: If the author is a developer, agency, or designer advertising their services ("for hire", "hire me", "looking for work", "available for freelance") -> REJECT ("FREELANCER_SEEKING_WORK").
+4. GENERAL DISCUSSION: Tutorials, programming questions, career advice, stack comparisons -> REJECT ("GENERAL_DISCUSSION").
+5. NOT IT PROJECT: Non-software/IT requirements (garments, accounts, marketing-only, sales, office admin) -> REJECT ("NOT_IT_PROJECT").
+6. NO ACTIONABLE CONTACT: If there is NO legitimate outreach route (no email, no phone, no public company website/contact link, no verified direct profile message route) -> REJECT ("NO_ACTIONABLE_CONTACT").
+
+Post Details:
+- Title: "${candidate.rawTitle}"
+- Author: "${candidate.author || ''}"
+- Source: "${candidate.source || ''}"
+- Source URL: "${candidate.sourceUrl || ''}"
+- Content:
 """
-${candidate.rawContent}
+${candidate.rawContent || ''}
 """
 
 Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the following schema:
 {
   "is_it_project": true or false,
-  "relevance_score": number between 1 and 100,
-  "intent": "Looking for Developer" or "Looking for Agency" or "Contract Requirement" or "For Hire" or "General Discussion",
+  "is_client_side_project": true or false,
+  "is_employment": true or false,
+  "is_internship": true or false,
+  "is_freelancer_seeking_work": true or false,
+  "qualification_status": "qualified" or "rejected",
+  "rejection_reason": "SOURCE_NOT_ALLOWED" or "NOT_IT_PROJECT" or "EMPLOYMENT" or "INTERNSHIP" or "FREELANCER_SEEKING_WORK" or "GENERAL_DISCUSSION" or "NO_PROJECT_REQUIREMENT" or "NO_ACTIONABLE_CONTACT" or null,
+  "project_intent": "Looking for Developer" or "Looking for Agency" or "Project Outsourcing" or "Contract Project" or "Fixed Price Project" or "Maintenance Project" or null,
   "category": "Web Development" or "Mobile App" or "UI/UX" or "SaaS" or "AI/ML" or "Other IT",
-  "title": "Clean concise project title",
-  "short_summary": "1-2 sentence executive summary of what client needs",
+  "title": "Concise cleaned title",
+  "short_summary": "1-2 sentence executive summary of what deliverable client needs",
   "skills": ["Skill1", "Skill2"],
   "features": ["Feature1", "Feature2"],
-  "client_name": "Client or company name if found",
-  "client_email": "Extracted email if found in text, else null",
-  "client_location": "USA/Europe/Remote/etc if found, else 'Remote'",
-  "budget": "Budget string e.g. '$3,000 - $5,000' or 'Hourly' or null",
+  "client_name": "Client or company name if found, else null",
+  "client_company": "Company name if detected, else null",
+  "client_email": "Valid email if present in text, else null",
+  "client_phone": "Valid phone if present in text, else null",
+  "client_location": "Location if found (e.g. USA, UK, Delhi NCR, Bangalore), else null",
+  "budget": "Raw budget string e.g. '$3,000' or '₹1,50,000' if stated, else null",
   "budget_min": number or null,
   "budget_max": number or null,
-  "project_type": "Fixed Price" or "Hourly" or "Contract" or "Agency"
+  "currency": "USD" or "INR" or "EUR" or "GBP" or null,
+  "project_type": "Fixed Price" or "Hourly" or "Contract" or "Agency" or null,
+  "has_actionable_contact": true or false,
+  "contact_type": "email" or "phone" or "public_business_contact" or "public_profile_message" or "public_company_website" or "none",
+  "contact_value": "email address, phone number, or verified contact URL",
+  "client_company_url": "Public company website if detected, else null",
+  "relevance_score": number between 1 and 100,
+  "contactability_score": number between 1 and 100,
+  "confidence": number between 1 and 100
 }
 `;
 
@@ -87,7 +127,7 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
         model: this.model,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
-        max_tokens: 600
+        max_tokens: 700
       }),
       signal: AbortSignal.timeout(10000)
     });
@@ -104,18 +144,183 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
   }
 
   /**
-   * Deterministic Heuristic Extractor (Works 100% offline with zero latency)
+   * Deterministic Strict Heuristic Qualifier & Extractor
+   * Adheres strictly to the Change Request Specification.
    */
   heuristicQualification(candidate) {
-    // 1. Reject non-tech corporate roles & non-project corporate jobs
-    if (/payroll|student assistant|recruiter|hr manager|receptionist|accountant|fashion communication|garment draping|business development manager/i.test(candidate.rawTitle)) {
-      return null;
+    const title = (candidate.rawTitle || '').trim();
+    const content = (candidate.rawContent || '').trim();
+    const fullText = `${title} ${content}`;
+    const lowerText = fullText.toLowerCase();
+
+    // ----------------------------------------------------
+    // GATE 1: Hard Reject - Freelancer Seeking Work (Supply-Side)
+    // ----------------------------------------------------
+    const freelancerSeekingRegex = /\b(for hire|hire me|looking for work|seeking work|available for freelance|available for hire|portfolio:|my portfolio|i offer|i am a .* developer looking|my agency is looking for clients|looking for (new )?clients|open for freelance|open for projects)\b/i;
+    if (freelancerSeekingRegex.test(title) || freelancerSeekingRegex.test(content.substring(0, 300))) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'FREELANCER_SEEKING_WORK',
+        is_client_side_project: false,
+        is_freelancer_seeking_work: true,
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
     }
 
-    const text = `${candidate.rawTitle} ${candidate.rawContent}`;
-    const lower = text.toLowerCase();
+    // ----------------------------------------------------
+    // GATE 2: Hard Reject - Internship / Trainee / Fresher
+    // ----------------------------------------------------
+    const internshipRegex = /\b(intern\b|internship|apprenticeship|trainee|stipend|freshers? welcome|fresher)\b/i;
+    if (internshipRegex.test(fullText)) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'INTERNSHIP',
+        is_client_side_project: false,
+        is_internship: true,
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
+    }
 
-    // Skill detection
+    // ----------------------------------------------------
+    // GATE 3: Hard Reject - Employment / Salaried Jobs / HR
+    // ----------------------------------------------------
+    const employmentRegex = /\b(full[- ]?time (job|role|position|employee)|permanent (role|position|employee)|annual ctc|ctc\s*:\s*|[\d.]+\s*lpa|job vacancy|job opening|notice period|immediate joiner|send your (resume|cv)|submit (resume|cv)|pf\b|esi\b|hr manager|recruiter|recruitment|benefits package|401k|paid time off|pto)\b/i;
+    if (employmentRegex.test(fullText)) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'EMPLOYMENT',
+        is_client_side_project: false,
+        is_employment: true,
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
+    }
+
+    // ----------------------------------------------------
+    // GATE 4: Hard Reject - General Discussion / Learning
+    // ----------------------------------------------------
+    const discussionRegex = /\b(how (do|can) i learn|which (library|framework|stack)|best (stack|framework|library)|how much does a website cost|tutorial|career advice|programming question|what do you think of)\b/i;
+    if (discussionRegex.test(fullText)) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'GENERAL_DISCUSSION',
+        is_client_side_project: false,
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
+    }
+
+    // ----------------------------------------------------
+    // GATE 5: Non-IT / Corporate Roles Rejection
+    // ----------------------------------------------------
+    const nonItRegex = /\b(payroll|student assistant|receptionist|accountant|garment|fashion communication|sales executive|telecaller|bpo)\b/i;
+    if (nonItRegex.test(title)) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'NOT_IT_PROJECT',
+        is_it_project: false,
+        is_client_side_project: false,
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
+    }
+
+    // ----------------------------------------------------
+    // GATE 6: Client-Side Project Requirement Check
+    // Must contain evidence of an IT deliverable wanted
+    // ----------------------------------------------------
+    const deliverableRegex = /\b(build|develop|create|redesign|revamp|implement|integrate|migrate|mvp|saas|website|web app|mobile app|application|portal|dashboard|crm|erp|ecommerce|e-commerce|shopify|wordpress|flutter|react|node|api|automation|chatbot|voice agent|software)\b/i;
+    const clientNeedRegex = /\b(need|looking for|seeking|want|hiring a (developer|agency|team|freelancer)|rfp|scope of work|project)\b/i;
+
+    const hasDeliverable = deliverableRegex.test(fullText);
+    const hasClientNeed = clientNeedRegex.test(fullText);
+
+    if (!hasDeliverable || !hasClientNeed) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'NO_PROJECT_REQUIREMENT',
+        is_client_side_project: false,
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
+    }
+
+    // ----------------------------------------------------
+    // GATE 7: Actionable Contactability Verification
+    // Do NOT infer contactability from source name alone.
+    // ----------------------------------------------------
+    // 1. Email check
+    const emailMatch = fullText.match(/\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/i);
+    let validEmail = null;
+    if (emailMatch && !emailMatch[1].includes('example.com') && !emailMatch[1].includes('test.com') && !emailMatch[1].includes('leadspy.app')) {
+      validEmail = emailMatch[1];
+    }
+
+    // 2. Phone check (E.164 or Indian/US standard formatted numbers)
+    const phoneMatch = fullText.match(/(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/) ||
+                       fullText.match(/(?:\+91[\-\s]?)?[6789]\d{9}\b/);
+    const validPhone = phoneMatch ? phoneMatch[0].trim() : null;
+
+    // 3. Public business contact / company URL
+    const urlMatch = fullText.match(/https?:\/\/[^\s"'<>]+/gi);
+    let publicBusinessContactUrl = null;
+    let clientCompanyUrl = null;
+
+    if (urlMatch) {
+      for (const u of urlMatch) {
+        const cleanUrl = u.replace(/[),.;]+$/, '');
+        if (cleanUrl.includes('/contact') || cleanUrl.includes('/apply') || cleanUrl.includes('/hire')) {
+          publicBusinessContactUrl = cleanUrl;
+          break;
+        } else if (!cleanUrl.includes('reddit.com') && !cleanUrl.includes('ycombinator.com') && !cleanUrl.includes('hasjob.co')) {
+          clientCompanyUrl = cleanUrl;
+        }
+      }
+    }
+
+    // 4. Public Profile Message (Only if valid native author username exists on Reddit/HN)
+    let hasPublicProfileRoute = false;
+    let authorProfileUrl = candidate.authorProfileUrl || null;
+    if (candidate.source === 'reddit' && candidate.author && candidate.author !== 'Anonymous' && candidate.author !== '[deleted]' && candidate.author !== 'AutoModerator') {
+      hasPublicProfileRoute = true;
+      if (!authorProfileUrl) authorProfileUrl = `https://www.reddit.com/user/${candidate.author}`;
+    }
+
+    let contactType = 'none';
+    let contactValue = null;
+
+    if (validEmail) {
+      contactType = 'email';
+      contactValue = validEmail;
+    } else if (validPhone) {
+      contactType = 'phone';
+      contactValue = validPhone;
+    } else if (publicBusinessContactUrl) {
+      contactType = 'public_business_contact';
+      contactValue = publicBusinessContactUrl;
+    } else if (clientCompanyUrl) {
+      contactType = 'public_company_website';
+      contactValue = clientCompanyUrl;
+    } else if (hasPublicProfileRoute) {
+      contactType = 'public_profile_message';
+      contactValue = authorProfileUrl;
+    }
+
+    if (contactType === 'none') {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'NO_ACTIONABLE_CONTACT',
+        is_client_side_project: true,
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
+    }
+
+    // ----------------------------------------------------
+    // Entity Extraction: Tech Stack, Category, Location, Budget
+    // ----------------------------------------------------
     const skillList = [
       'React', 'Next.js', 'Node.js', 'TypeScript', 'JavaScript', 'Python',
       'Flutter', 'React Native', 'Swift', 'Kotlin', 'iOS', 'Android',
@@ -123,127 +328,157 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       'WordPress', 'Shopify', 'Supabase', 'PostgreSQL', 'MongoDB',
       'FastAPI', 'AI', 'LangChain', 'OpenAI', 'AWS', 'Docker'
     ];
-    const detectedSkills = skillList.filter(s => new RegExp(`\\b${s.replace('.', '\\.')}\\b`, 'i').test(text));
+    const detectedSkills = skillList.filter(s => new RegExp(`\\b${s.replace('.', '\\.')}\\b`, 'i').test(fullText));
 
-    // Category detection
     let category = 'Web Development';
-    if (/\bmobile\b|flutter|react native|ios\b|android/i.test(text)) {
+    if (/\bmobile\b|flutter|react native|ios\b|android/i.test(fullText)) {
       category = 'Mobile App';
-    } else if (/ui\/ux|ux design|ui design|web design|redesign/i.test(text)) {
+    } else if (/ui\/ux|ux design|ui design|web design/i.test(fullText)) {
       category = 'UI/UX';
-    } else if (/langchain|llm\b|machine learning|openai|fastapi/i.test(text)) {
+    } else if (/langchain|llm\b|machine learning|openai|fastapi|chatbot|voice agent/i.test(fullText)) {
       category = 'AI/ML';
-    } else if (/\bsaas\b|micro-saas|b2b/i.test(text)) {
+    } else if (/\bsaas\b|micro-saas|b2b/i.test(fullText)) {
       category = 'SaaS';
-    } else if (/web|website|portal|next\.js|react|full stack|frontend|backend|node/i.test(text)) {
-      category = 'Web Development';
     }
 
-    // Email extraction
-    const emailMatch = text.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+)/i);
-    const clientEmail = emailMatch ? emailMatch[1] : null;
-
-    // Location detection (Supporting India & Indian Metros)
-    let clientLocation = 'Global / Remote';
-    if (/india|delhi|bangalore|bengaluru|mumbai|pune|hyderabad|noida|gurugram|gurgaon|surat|chennai/i.test(text)) {
-      if (/delhi|noida|gurugram|gurgaon/i.test(text)) clientLocation = 'Delhi NCR, India';
-      else if (/bangalore|bengaluru/i.test(text)) clientLocation = 'Bangalore, India';
-      else if (/mumbai/i.test(text)) clientLocation = 'Mumbai, India';
-      else if (/pune/i.test(text)) clientLocation = 'Pune, India';
-      else if (/hyderabad/i.test(text)) clientLocation = 'Hyderabad, India';
-      else clientLocation = 'India (Remote)';
-    } else if (text.includes('USA') || text.includes('US') || text.includes('America')) {
+    // Strict Location: null if not mentioned
+    let clientLocation = null;
+    if (/india|delhi|bangalore|bengaluru|mumbai|pune|hyderabad|noida|gurugram|gurgaon|chennai/i.test(fullText)) {
+      if (/delhi|noida|gurugram|gurgaon/i.test(fullText)) clientLocation = 'Delhi NCR, India';
+      else if (/bangalore|bengaluru/i.test(fullText)) clientLocation = 'Bangalore, India';
+      else if (/mumbai/i.test(fullText)) clientLocation = 'Mumbai, India';
+      else if (/pune/i.test(fullText)) clientLocation = 'Pune, India';
+      else if (/hyderabad/i.test(fullText)) clientLocation = 'Hyderabad, India';
+      else clientLocation = 'India';
+    } else if (/\b(usa|united states|us|san francisco|new york|california|austin|texas)\b/i.test(fullText)) {
       clientLocation = 'USA';
-    } else if (text.includes('UK') || text.includes('London')) {
+    } else if (/\b(uk|united kingdom|london)\b/i.test(fullText)) {
       clientLocation = 'UK';
-    } else if (text.includes('Canada')) {
+    } else if (/\bcanada\b/i.test(fullText)) {
       clientLocation = 'Canada';
+    } else if (/\bremote\b/i.test(fullText)) {
+      clientLocation = 'Remote';
     }
 
-    // Budget & Currency extraction (USD & INR)
+    // Strict Budget: null if not mentioned
     let budget = null;
     let budgetMin = null;
     let budgetMax = null;
-    let currency = 'USD';
+    let currency = null;
 
-    const inrMatch = text.match(/₹\s*[\d,]+(\s*-\s*₹\s*[\d,]+)?/i) || text.match(/INR\s*[\d,]+/i) || text.match(/[\d.]+\s*Lakh/i);
-    const budgetMatch = text.match(/\$[\d,]+(\s*-\s*\$[\d,]+)?/);
+    const inrMatch = fullText.match(/₹\s*[\d,]+(\s*-\s*₹?\s*[\d,]+)?/i) || fullText.match(/INR\s*[\d,]+/i) || fullText.match(/[\d.]+\s*Lakh/i);
+    const usdMatch = fullText.match(/\$[\d,]+(\s*-\s*\$?[\d,]+)?/);
 
     if (inrMatch) {
-      budget = inrMatch[0];
+      budget = inrMatch[0].trim();
       currency = 'INR';
-    } else if (budgetMatch) {
-      budget = budgetMatch[0];
+      const digits = budget.match(/[\d,]+/g);
+      if (digits && digits.length >= 1) {
+        budgetMin = parseInt(digits[0].replace(/,/g, ''), 10);
+        budgetMax = digits[1] ? parseInt(digits[1].replace(/,/g, ''), 10) : budgetMin;
+      }
+    } else if (usdMatch) {
+      budget = usdMatch[0].trim();
       currency = 'USD';
-      const nums = budget.replace(/\$/g, '').replace(/,/g, '').split('-').map(n => parseFloat(n.trim())).filter(Boolean);
-      if (nums.length === 1) {
-        budgetMin = nums[0];
-        budgetMax = nums[0];
-      } else if (nums.length >= 2) {
-        budgetMin = nums[0];
-        budgetMax = nums[1];
+      const digits = budget.match(/[\d,]+/g);
+      if (digits && digits.length >= 1) {
+        budgetMin = parseInt(digits[0].replace(/,/g, ''), 10);
+        budgetMax = digits[1] ? parseInt(digits[1].replace(/,/g, ''), 10) : budgetMin;
       }
     }
 
-    // Client contact method
-    let contactMethod = 'external_link';
-    if (clientEmail) contactMethod = 'email';
-    else if (candidate.source === 'reddit') contactMethod = 'reddit_dm';
-    else if (candidate.source === 'linkedin') contactMethod = 'linkedin_message';
+    const shortSummary = content.substring(0, 180).trim() + (content.length > 180 ? '...' : '');
 
     return {
+      qualification_status: 'qualified',
+      rejection_reason: null,
+      is_it_project: true,
+      is_client_side_project: true,
+      is_employment: false,
+      is_internship: false,
+      is_freelancer_seeking_work: false,
       source: candidate.source,
       sourceUrl: candidate.sourceUrl,
-      sourcePostId: candidate.sourcePostId,
-      title: candidate.rawTitle,
-      shortSummary: candidate.rawContent.substring(0, 180).trim() + (candidate.rawContent.length > 180 ? '...' : ''),
-      originalDescription: candidate.rawContent,
+      sourcePostId: candidate.sourcePostId || null,
+      title: title,
+      shortSummary: shortSummary || title,
+      originalDescription: content || title,
       category,
-      skills: detectedSkills.length > 0 ? detectedSkills : ['Full Stack', 'Web'],
-      features: ['Custom Deliverables', 'Project Milestones'],
-      clientName: candidate.author || 'Client',
-      clientUsername: candidate.author,
-      clientEmail,
-      clientProfileUrl: candidate.authorProfileUrl,
-      clientContactMethod: contactMethod,
+      skills: detectedSkills,
+      features: ['Project Deliverable'],
+      clientName: candidate.author || null,
+      clientUsername: candidate.author || null,
+      clientEmail: validEmail,
+      clientPhone: validPhone,
+      clientCompany: null,
+      clientCompanyUrl: clientCompanyUrl,
+      clientProfileUrl: authorProfileUrl,
       clientLocation,
-      budget: budget || 'Negotiable',
+      budget,
       budgetMin,
       budgetMax,
       currency,
-      projectType: budget ? 'Fixed Milestone' : 'Contract / Gig',
-      intent: 'Looking for Agency / Developer',
-      relevanceScore: 90,
-      postedAt: candidate.postedAt,
+      projectType: budget ? 'Fixed Price' : 'Contract',
+      projectIntent: 'Looking for Agency / Developer',
+      has_actionable_contact: true,
+      contact_type: contactType,
+      contact_value: contactValue,
+      relevanceScore: 88,
+      contactabilityScore: contactType === 'email' ? 95 : (contactType === 'phone' ? 90 : 80),
+      postedAt: candidate.postedAt || new Date().toISOString(),
       discoveredAt: new Date().toISOString()
     };
   }
 
   formatExtractedProject(candidate, llmResult) {
+    if (llmResult.qualification_status === 'rejected' || !llmResult.has_actionable_contact || llmResult.contact_type === 'none') {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: llmResult.rejection_reason || 'NO_ACTIONABLE_CONTACT',
+        is_client_side_project: Boolean(llmResult.is_client_side_project),
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
+    }
+
     return {
+      qualification_status: 'qualified',
+      rejection_reason: null,
+      is_it_project: true,
+      is_client_side_project: true,
+      is_employment: false,
+      is_internship: false,
+      is_freelancer_seeking_work: false,
       source: candidate.source,
       sourceUrl: candidate.sourceUrl,
-      sourcePostId: candidate.sourcePostId,
+      sourcePostId: candidate.sourcePostId || null,
       title: llmResult.title || candidate.rawTitle,
-      shortSummary: llmResult.short_summary || candidate.rawContent.substring(0, 180),
-      originalDescription: candidate.rawContent,
+      shortSummary: llmResult.short_summary || candidate.rawContent?.substring(0, 180) || candidate.rawTitle,
+      originalDescription: candidate.rawContent || candidate.rawTitle,
       category: llmResult.category || 'Web Development',
       skills: Array.isArray(llmResult.skills) ? llmResult.skills : [],
       features: Array.isArray(llmResult.features) ? llmResult.features : [],
-      clientName: llmResult.client_name || candidate.author,
-      clientUsername: candidate.author,
+      clientName: llmResult.client_name || candidate.author || null,
+      clientUsername: candidate.author || null,
       clientEmail: llmResult.client_email || null,
-      clientProfileUrl: candidate.authorProfileUrl,
-      clientContactMethod: llmResult.client_email ? 'email' : (candidate.source === 'reddit' ? 'reddit_dm' : 'external_link'),
-      clientLocation: llmResult.client_location || 'Remote',
-      budget: llmResult.budget || 'Negotiable',
+      clientPhone: llmResult.client_phone || null,
+      clientCompany: llmResult.client_company || null,
+      clientCompanyUrl: llmResult.client_company_url || null,
+      clientProfileUrl: candidate.authorProfileUrl || null,
+      clientLocation: llmResult.client_location || null,
+      budget: llmResult.budget || null,
       budgetMin: llmResult.budget_min || null,
       budgetMax: llmResult.budget_max || null,
-      currency: 'USD',
+      currency: llmResult.currency || null,
       projectType: llmResult.project_type || 'Contract',
-      intent: llmResult.intent || 'Looking for Developer',
-      relevanceScore: llmResult.relevance_score || 80,
-      postedAt: candidate.postedAt,
+      projectIntent: llmResult.project_intent || 'Looking for Developer',
+      has_actionable_contact: true,
+      contact_type: llmResult.contact_type || 'public_profile_message',
+      contact_value: llmResult.contact_value || candidate.sourceUrl,
+      relevanceScore: llmResult.relevance_score || 85,
+      contactabilityScore: llmResult.contactability_score || 80,
+      confidence: llmResult.confidence || 85,
+      postedAt: candidate.postedAt || new Date().toISOString(),
       discoveredAt: new Date().toISOString()
     };
   }

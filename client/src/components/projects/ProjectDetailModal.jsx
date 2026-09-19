@@ -161,15 +161,33 @@ export default function ProjectDetailModal({ project, onClose, onSave, isSaved =
 
             {/* Direct Action Buttons */}
             <div className="grid grid-cols-2 gap-2 pt-1">
-              {project.clientEmail ? (
+              {project.contactType === 'email' && project.clientEmail ? (
                 <a
-                  href={`mailto:${project.clientEmail}?subject=Regarding%20your%20${encodeURIComponent(project.title)}&body=Hi%20${encodeURIComponent(project.clientName)},%0D%0A%0D%0AI%20saw%20your%20requirement%20for%20${encodeURIComponent(project.title)}...`}
+                  href={`mailto:${project.clientEmail}?subject=Regarding%20your%20${encodeURIComponent(project.title)}&body=Hi%20${encodeURIComponent(project.clientName || 'there')},%0D%0A%0D%0AI%20saw%20your%20requirement%20for%20${encodeURIComponent(project.title)}...`}
                   className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 text-white font-medium text-xs shadow-lg shadow-orange-500/20 hover:opacity-95 transition"
                 >
                   <Mail className="w-4 h-4" />
                   Send Direct Email
                 </a>
-              ) : project.source === 'reddit' ? (
+              ) : project.contactType === 'phone' && project.clientPhone ? (
+                <a
+                  href={`tel:${project.clientPhone}`}
+                  className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 text-white font-medium text-xs shadow-lg shadow-emerald-600/20 hover:opacity-95 transition"
+                >
+                  <MessageSquare className="w-4 h-4" />
+                  Call {project.clientPhone}
+                </a>
+              ) : (project.contactType === 'public_business_contact' || project.contactType === 'public_company_website') && (project.contactValue || project.clientCompanyUrl) ? (
+                <a
+                  href={project.contactValue || project.clientCompanyUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 text-white font-medium text-xs shadow-lg shadow-cyan-600/20 hover:opacity-95 transition"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  Visit Contact Page
+                </a>
+              ) : project.contactType === 'public_profile_message' && project.clientUsername ? (
                 <a
                   href={`https://reddit.com/message/compose/?to=${project.clientUsername}&subject=Regarding%20your%20project:%20${encodeURIComponent(project.title)}`}
                   target="_blank"
@@ -177,7 +195,7 @@ export default function ProjectDetailModal({ project, onClose, onSave, isSaved =
                   className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-[#ff4500] text-white font-medium text-xs shadow-lg shadow-[#ff4500]/20 hover:opacity-95 transition"
                 >
                   <MessageSquare className="w-4 h-4" />
-                  Send Reddit DM
+                  Send Direct Profile DM
                 </a>
               ) : (
                 <a
