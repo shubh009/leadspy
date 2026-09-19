@@ -220,8 +220,10 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     // ----------------------------------------------------
     // GATE 1: Hard Reject - Freelancer Seeking Work (Supply-Side)
     // ----------------------------------------------------
-    const freelancerSeekingRegex = /\b(for hire|hire me|looking for (freelance )?(work|projects)|seeking (freelance )?(work|projects)|available for (freelance|hire|new projects|projects|work)|portfolio:|my portfolio|i offer|i can build .* (available|contact me)|i am a .* developer (looking|available)|my agency is looking for clients|looking for (new )?clients|open for (freelance|projects)|full[- ]?stack developer available)\b/i;
-    if (freelancerSeekingRegex.test(title) || freelancerSeekingRegex.test(content.substring(0, 400))) {
+    const isDevSelfIntro = /(location\s*[:=-].*remote\s*[:=-]|willing to relocate\s*[:=-]|technologies\s*[:=-]|my name('s|\s+is)|i would make a good candidate|hire me|i'm open to|i am open to (roles|contracts)|available for hire|available for contract|looking for (contract|work|roles|projects)|seeking (contract|work|roles|projects))/i.test(fullText);
+    const freelancerSeekingRegex = /\b(for hire|hire me|looking for (freelance )?(work|projects)|seeking (freelance )?(work|projects)|available for (freelance|hire|new projects|projects|work)|portfolio:|my portfolio|i offer|i can build .* (available|contact me)|i am a .* developer (looking|available)|my agency is looking for clients|looking for (new )?clients|open for (freelance|projects)|full[- ]?stack developer available|seeking work|willing to relocate\s*[:=-]|technologies\s*[:=-]|rates?\s*[:=-]\s*[\$€£]|hourly rate)\b/i;
+
+    if (isDevSelfIntro || freelancerSeekingRegex.test(title) || freelancerSeekingRegex.test(content.substring(0, 400))) {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'FREELANCER_SEEKING_WORK',
@@ -250,10 +252,11 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     // ----------------------------------------------------
-    // GATE 3: Hard Reject - General Discussion / Learning
+    // GATE 3: Hard Reject - General Discussion / Learning / Comment Quotes
     // ----------------------------------------------------
-    const discussionRegex = /\b(how (do|can) i learn|which (library|framework|stack|technology)|best (stack|framework|library|technology)|how much does a website cost|average (price|cost) for|researching .* costs|tutorial|career advice|programming question|what do you think of|i want to learn|recommend a good (react|developer)|can anyone recommend)\b/i;
-    if (discussionRegex.test(fullText)) {
+    const isQuoting = /^\s*(&gt;|>)/.test(content) || /^\s*(&gt;|>)/.test(title);
+    const discussionRegex = /\b(how (do|can) i learn|which (library|framework|stack|technology)|best (stack|framework|library|technology)|how much does a website cost|average (price|cost) for|researching .* costs|tutorial|career advice|programming question|what do you think of|i want to learn|recommend a good (react|developer)|can anyone recommend|i believe this is a .* way of thinking|seems to be a lot of overlap|in my opinion|from my experience|it just occurred to me)\b/i;
+    if (isQuoting || discussionRegex.test(fullText)) {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'GENERAL_DISCUSSION',
@@ -270,7 +273,7 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     const isFeatureSalary = /salary\s*(calculation|module|component|integration|slip|management|system)/i.test(fullText);
     const isExternalAgencyHiring = /hiring\s*(an?\s*)?(external\s*)?(development\s*)?(agency|firm|team|vendor|contractor)\s*(to|for)?/i.test(fullText);
 
-    const employmentRegex = /\b(software development engineer|sde\b|software engineer\s*[-—–]\s*(mobile|backend|frontend)|full[- ]?time (job|role|position|employee)?|permanent (role|position|employee)|annual ctc|ctc\s*[:=]|[\d.]+\s*lpa|job vacancy|job opening|notice period|immediate joiner|send your (resume|cv)|submit (resume|cv)|join (our|the) team|join our (growing )?engineering team|join our growing team|expanding our engineering team|hiring freshers?|freshers? (can apply|welcome|hiring)|pf\b|esi\b|hr manager|recruiter|recruitment|benefits package|401k|paid time off|pto|salary\s*[:=₹$]|operator\s*\([^\)]+\))\b/i;
+    const employmentRegex = /\b(software development engineer|sde\b|software engineer\s*[-—–]\s*(mobile|backend|frontend)|senior (software )?engineer|staff engineer|principal engineer|full[- ]?time (job|role|position|employee)?|permanent (role|position|employee)|annual ctc|ctc\s*[:=]|[\d.]+\s*lpa|job vacancy|job opening|notice period|immediate joiner|send your (resume|cv)|submit (resume|cv)|join (our|the) team|join our (growing )?engineering team|join our growing team|expanding our engineering team|hiring freshers?|freshers? (can apply|welcome|hiring)|pf\b|esi\b|hr manager|recruiter|recruitment|benefits package|401k|paid time off|pto|salary\s*[:=₹$]|operator\s*\([^\)]+\)|onsite preferred|w2 (role|position|project)|hybrid\s*\d+x|director\s*(of)?|vp\s*(of)?|head of\b)\b/i;
 
     if (!isFeatureSalary && !isExternalAgencyHiring && employmentRegex.test(fullText)) {
       return {
@@ -330,8 +333,10 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     // 2. Phone check (E.164, Indian standard, or US standard with spaces/dashes e.g. +1 555 123 4567)
-    const phoneMatch = fullText.match(/(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/) ||
-                       fullText.match(/(?:\+91[\-\s]?)?[6789]\d{9}\b/);
+    // Strip URLs before checking phone numbers to avoid tweet IDs or URL numbers matching
+    const textWithoutUrls = fullText.replace(/https?:\/\/[^\s"'<>]+/gi, '');
+    const phoneMatch = textWithoutUrls.match(/(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/) ||
+                       textWithoutUrls.match(/(?:\+91[\-\s]?)?[6789]\d{9}\b/);
     const validPhone = phoneMatch ? phoneMatch[0].trim() : null;
 
     // 3. Public business contact / company URL

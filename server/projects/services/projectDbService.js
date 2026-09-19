@@ -1,4 +1,5 @@
 import { supabase } from '../../config/supabase.js';
+import crypto from 'crypto';
 
 /**
  * LeadSpy Project Database Service
@@ -15,8 +16,8 @@ export async function saveMasterProjects(projects = []) {
   let insertedCount = 0;
 
   for (const p of projects) {
-    // Generate canonical ID if not provided
-    const canonicalId = p.canonicalId || `${p.source}-${Buffer.from(p.sourceUrl || p.title).toString('base64').substring(0, 24)}`;
+    // Generate unique, deterministic canonical ID using MD5 hash of source_url
+    const canonicalId = p.canonicalId || `proj-${crypto.createHash('md5').update(p.sourceUrl || p.title || String(Math.random())).digest('hex')}`;
     const record = {
       canonical_id: canonicalId,
       source: p.source || 'web',
@@ -71,7 +72,7 @@ export async function saveMasterProjects(projects = []) {
       const recordsToUpsert = [];
 
       for (const p of IN_MEMORY_PROJECTS) {
-        const cid = `proj-${Buffer.from(p.source_url || p.title).toString('base64').replace(/=/g, '').substring(0, 50)}`;
+        const cid = p.canonical_id || `proj-${crypto.createHash('md5').update(p.source_url || p.title || String(Math.random())).digest('hex')}`;
         if (!seen.has(cid)) {
           seen.add(cid);
           recordsToUpsert.push({
@@ -107,7 +108,7 @@ export async function saveMasterProjects(projects = []) {
 
       const { error } = await supabase
         .from('master_projects')
-        .upsert(recordsToUpsert, { onConflict: 'canonical_id' });
+        .upsert(recordsToUpsert, { onConflict: 'source_url' });
 
       if (error) {
         console.warn('Supabase batch upsert warning:', error.message);
