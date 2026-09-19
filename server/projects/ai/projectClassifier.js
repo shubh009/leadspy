@@ -1,5 +1,17 @@
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
 dotenv.config();
+// Also attempt loading server/.env if invoked from root
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+
+export const CLASSIFICATION_MODE = {
+  HEURISTIC: 'heuristic',
+  LLM: 'llm',
+  HYBRID: 'hybrid'
+};
 
 /**
  * AI Project Classifier & Structured Entity Extractor
@@ -7,11 +19,12 @@ dotenv.config();
  * Based on Project Discovery Engine Change Request Specification
  */
 export class ProjectClassifier {
-  constructor() {
+  constructor(options = {}) {
+    this.classificationMode = options.classificationMode || process.env.CLASSIFICATION_MODE || CLASSIFICATION_MODE.HYBRID;
     this.geminiApiKey = process.env.GEMINI_API_KEY;
     this.geminiModel = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
     this.apiKey = process.env.OPENROUTER_API_KEY;
-    this.model = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
+    this.model = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash';
     this.seenSignatures = new Set();
     this.seenProjects = [];
     this.enableDeduplication = true;
@@ -48,6 +61,8 @@ export class ProjectClassifier {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'NO_PROJECT_REQUIREMENT',
+        rejection_gate: 'GATE_0',
+        evidence_summary: 'Candidate object is empty or null',
         is_client_side_project: false
       };
     }
@@ -58,30 +73,64 @@ export class ProjectClassifier {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'SOURCE_NOT_ALLOWED',
+        rejection_gate: 'GATE_0',
+        evidence_summary: `Source '${candidate.source}' is on the excluded platform list`,
         is_client_side_project: false
       };
     }
 
-    let result = null;
+    // 1. DETERMINISTIC HARD REJECTION PRE-CHECKS
+    // In hybrid and heuristic modes, deterministic hard gates run FIRST.
+    // Hard rejections (freelancer self-pitch, discussion, employment, marketing, product page)
+    // must NEVER be overridden by the LLM.
+    const heuristicCheck = this.heuristicQualification(candidate);
 
-    // 1. Try LLM Qualification if API Key exists (Gemini primary, OpenRouter secondary)
-    if (this.geminiApiKey || this.apiKey) {
+    if (this.classificationMode === CLASSIFICATION_MODE.HEURISTIC) {
+      return this.applyGate8Deduplication(candidate, heuristicCheck);
+    }
+
+    // If deterministic gates rejected the candidate, enforce immediate hard rejection
+    if (heuristicCheck.qualification_status === 'rejected') {
+      return heuristicCheck;
+    }
+
+    // 2. Candidate passed deterministic hard gates. If LLM enabled, perform LLM semantic extraction & qualification
+    let result = null;
+    if ((this.classificationMode === CLASSIFICATION_MODE.HYBRID || this.classificationMode === CLASSIFICATION_MODE.LLM) && (this.geminiApiKey || this.apiKey)) {
       try {
         const llmResult = await this.callLLM(candidate);
         if (llmResult && typeof llmResult.qualification_status === 'string') {
-          result = this.formatExtractedProject(candidate, llmResult);
+          // If LLM rejects, we respect LLM rejection
+          if (llmResult.qualification_status === 'rejected') {
+            result = {
+              qualification_status: 'rejected',
+              rejection_reason: llmResult.rejection_reason || 'UNQUALIFIED',
+              rejection_gate: 'LLM_REJECTION',
+              evidence_summary: llmResult.evidence_summary || 'Rejected by LLM semantic evaluation',
+              is_client_side_project: false,
+              has_actionable_contact: false,
+              contact_type: 'none'
+            };
+          } else {
+            // LLM qualified it: verify it actually has actionable contact per deterministic contract
+            result = this.formatExtractedProject(candidate, llmResult, heuristicCheck);
+          }
         }
       } catch (err) {
         console.warn('[ProjectClassifier] LLM qualification failed, using strict heuristic fallback:', err.message);
       }
     }
 
-    // 2. Deterministic Strict Heuristic Classifier & Extractor (Mirror of LLM rules)
+    // 3. Fallback to deterministic heuristic check if LLM was unavailable or failed
     if (!result) {
-      result = this.heuristicQualification(candidate);
+      result = heuristicCheck;
     }
 
-    // 3. Gate 8: Deduplication check (TC-048 & TC-049) - only performed on candidates that passed all prior gates
+    return this.applyGate8Deduplication(candidate, result);
+  }
+
+  applyGate8Deduplication(candidate, result) {
+    // Gate 8: Deduplication check (TC-048 & TC-049) - only performed on candidates that passed all prior gates
     if (this.enableDeduplication && result.qualification_status === 'qualified') {
       const exactSig = (candidate.source && candidate.sourcePostId ? `${candidate.source}:${candidate.sourcePostId}` : null)
         || candidate.sourceUrl
@@ -91,6 +140,8 @@ export class ProjectClassifier {
         return {
           qualification_status: 'rejected',
           rejection_reason: 'DUPLICATE',
+          rejection_gate: 'GATE_8',
+          evidence_summary: `Exact signature duplicate found: ${exactSig}`,
           is_client_side_project: false
         };
       }
@@ -107,6 +158,8 @@ export class ProjectClassifier {
             return {
               qualification_status: 'rejected',
               rejection_reason: 'DUPLICATE',
+              rejection_gate: 'GATE_8',
+              evidence_summary: `Semantic token duplicate: Jaccard similarity ${jaccard.toFixed(2)} exceeds 0.65 threshold`,
               is_client_side_project: false
             };
           }
@@ -128,22 +181,23 @@ export class ProjectClassifier {
 You are an expert IT Project Qualification Agent.
 Evaluate whether this post represents a genuine CLIENT-SIDE IT/SOFTWARE PROJECT OPPORTUNITY that has an ACTIONABLE WAY TO REACH THE CLIENT/COMPANY.
 
-STRICT REJECTION RULES (Check these first):
+STRICT REJECTION RULES:
 1. EMPLOYMENT / JOBS: If the post is hiring full-time employees, salaried staff, CTC/LPA, permanent roles, notice period, resume submissions -> REJECT ("EMPLOYMENT").
 2. INTERNSHIP: If the post is for interns, trainees, stipend, freshers -> REJECT ("INTERNSHIP").
 3. FREELANCER SEEKING WORK: If the author is a developer, agency, or designer advertising their services ("for hire", "hire me", "looking for work", "available for freelance") -> REJECT ("FREELANCER_SEEKING_WORK").
-4. GENERAL DISCUSSION: Tutorials, programming questions, career advice, stack comparisons -> REJECT ("GENERAL_DISCUSSION").
-5. NOT IT PROJECT: Non-software/IT requirements (garments, accounts, marketing-only, sales, office admin) -> REJECT ("NOT_IT_PROJECT").
-6. NO ACTIONABLE CONTACT: If there is NO legitimate outreach route (no email, no phone, no public company website/contact link, no verified direct profile message route) -> REJECT ("NO_ACTIONABLE_CONTACT").
+4. GENERAL DISCUSSION: Technical opinions, "which framework is better", tutorials, retrospectives, bug reports, showcase of past projects -> REJECT ("GENERAL_DISCUSSION").
+5. NON-IT SERVICE: Marketing gigs, SEO services, social media posting, VA, content writing, unless it is custom IT software/platform engineering -> REJECT ("NON_IT_SERVICE").
+6. PRODUCT OR COMPANY PAGE: Product homepage, consumer tool, download portal, company about page -> REJECT ("PRODUCT_OR_COMPANY_PAGE").
+7. NO ACTIONABLE CONTACT: No direct email, phone, valid RFP/contact link, or native social profile -> REJECT ("NO_ACTIONABLE_CONTACT").
 
 Post Details:
-- Title: "${candidate.rawTitle}"
+- Title: "${candidate.rawTitle || candidate.title || ''}"
 - Author: "${candidate.author || ''}"
 - Source: "${candidate.source || ''}"
 - Source URL: "${candidate.sourceUrl || ''}"
 - Content:
 """
-${candidate.rawContent || ''}
+${candidate.rawContent || candidate.snippet || ''}
 """
 
 Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the following schema:
@@ -154,7 +208,7 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
   "is_internship": true or false,
   "is_freelancer_seeking_work": true or false,
   "qualification_status": "qualified" or "rejected",
-  "rejection_reason": "SOURCE_NOT_ALLOWED" or "NOT_IT_PROJECT" or "EMPLOYMENT" or "INTERNSHIP" or "FREELANCER_SEEKING_WORK" or "GENERAL_DISCUSSION" or "NO_PROJECT_REQUIREMENT" or "NO_ACTIONABLE_CONTACT" or null,
+  "rejection_reason": "SOURCE_NOT_ALLOWED" or "NOT_IT_PROJECT" or "EMPLOYMENT" or "INTERNSHIP" or "FREELANCER_SEEKING_WORK" or "GENERAL_DISCUSSION" or "NO_PROJECT_REQUIREMENT" or "NON_IT_SERVICE" or "PRODUCT_OR_COMPANY_PAGE" or "NO_ACTIONABLE_CONTACT" or null,
   "project_intent": "Looking for Developer" or "Looking for Agency" or "Project Outsourcing" or "Contract Project" or "Fixed Price Project" or "Maintenance Project" or null,
   "category": "Web Development" or "Mobile App" or "UI/UX" or "SaaS" or "AI/ML" or "Other IT",
   "title": "Concise cleaned title",
@@ -172,7 +226,7 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
   "currency": "USD" or "INR" or "EUR" or "GBP" or null,
   "project_type": "Fixed Price" or "Hourly" or "Contract" or "Agency" or null,
   "has_actionable_contact": true or false,
-  "contact_type": "email" or "phone" or "public_business_contact" or "public_profile_message" or "public_company_website" or "none",
+  "contact_type": "email" or "phone" or "public_business_contact" or "public_profile_message" or "none",
   "contact_value": "email address, phone number, or verified contact URL",
   "client_company_url": "Public company website if detected, else null",
   "relevance_score": number between 1 and 100,
@@ -181,7 +235,7 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
 }
 `;
 
-    // 1. Try Gemini 3.6 Flash if Gemini API Key is present
+    // 1. Try Gemini if API Key is present
     if (this.geminiApiKey) {
       try {
         const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${this.geminiModel}:generateContent?key=${this.geminiApiKey}`;
@@ -196,7 +250,7 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
               responseMimeType: 'application/json'
             }
           }),
-          signal: AbortSignal.timeout(12000)
+          signal: AbortSignal.timeout(10000)
         });
 
         if (res.ok) {
@@ -228,16 +282,21 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
           model: this.model,
           messages: [{ role: 'user', content: prompt }],
           temperature: 0.1,
-          max_tokens: 700
+          max_tokens: 500
         }),
-        signal: AbortSignal.timeout(10000)
+        signal: AbortSignal.timeout(12000)
       });
 
       if (response.ok) {
         const data = await response.json();
         let text = data?.choices?.[0]?.message?.content || '';
         text = text.replace(/```json/gi, '').replace(/```/g, '').trim();
-        return JSON.parse(text);
+
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          return JSON.parse(jsonMatch[0]);
+        }
+        if (text) return JSON.parse(text);
       }
     }
 
@@ -249,10 +308,10 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
    * Adheres strictly to the Change Request Specification.
    */
   heuristicQualification(candidate) {
-    const title = (candidate.rawTitle || '').trim();
-    const content = (candidate.rawContent || '').trim();
+    const title = (candidate.rawTitle || candidate.title || '').trim();
+    const content = (candidate.rawContent || candidate.snippet || '').trim();
     const fullText = `${title} ${content}`;
-    const lowerText = fullText.toLowerCase();
+    const sourceUrl = candidate.sourceUrl || candidate.url || '';
 
     // ----------------------------------------------------
     // GATE 1: Hard Reject - Freelancer Seeking Work (Supply-Side)
@@ -264,6 +323,8 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       return {
         qualification_status: 'rejected',
         rejection_reason: 'FREELANCER_SEEKING_WORK',
+        rejection_gate: 'GATE_1',
+        evidence_summary: 'Supply-side freelancer or agency self-pitch advertising availability',
         is_client_side_project: false,
         is_freelancer_seeking_work: true,
         has_actionable_contact: false,
@@ -273,8 +334,6 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
 
     // ----------------------------------------------------
     // GATE 1B: Hard Reject - Foreign Country / Non-Offshore Lockout
-    // Rejects projects strictly requiring local US/UK/EU presence or forbidding overseas/offshore work
-    // Allows: Remote, Worldwide, Global, India, or unconstrained international projects.
     // ----------------------------------------------------
     const locationLockoutRegex = /\b(u\.?s\.?\s*(based|citizens?|residents?|only)\s*(only|freelancers?|developers?|engineers?)?|us\s+only|usa\s+only|must be in (the\s+)?(us|usa|united states|uk|canada|europe)|must be (located in|based in) (the\s+)?(us|usa|united states|uk|canada|europe)|(uk|canada|europe|australia)\s+only|(uk|canada|europe|australia)\s+based\s+only|no offshore|no overseas|no agency offshore|local candidates only|onsite only in\s+[a-z]+)\b/i;
 
@@ -282,6 +341,8 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       return {
         qualification_status: 'rejected',
         rejection_reason: 'RESTRICTED_LOCATION_NON_OFFSHORE',
+        rejection_gate: 'GATE_1B',
+        evidence_summary: 'Strict geographic restriction forbidding remote or offshore developers',
         is_client_side_project: false,
         has_actionable_contact: false,
         contact_type: 'none'
@@ -290,7 +351,6 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
 
     // ----------------------------------------------------
     // GATE 2: Hard Reject - Internship / Trainee
-    // (Context-Aware: allows "internship management portal/app")
     // ----------------------------------------------------
     const isInternshipApp = /internship\s*(management|portal|app|system|platform)/i.test(fullText);
     const internshipRegex = /\b(intern\b|internship|apprenticeship|trainee|stipend)\b/i;
@@ -298,6 +358,8 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       return {
         qualification_status: 'rejected',
         rejection_reason: 'INTERNSHIP',
+        rejection_gate: 'GATE_2',
+        evidence_summary: 'Educational internship or trainee role without professional contract budget',
         is_client_side_project: false,
         is_internship: true,
         has_actionable_contact: false,
@@ -306,22 +368,38 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     // ----------------------------------------------------
-    // GATE 3: Hard Reject - General Discussion / Learning / Comment Quotes / Technical Q&A / Repo Bug Issues
+    // GATE 3: Hard Reject - General Discussion / Learning / Technical Q&A / Repo Bug Issues / Product Homepages
     // ----------------------------------------------------
     const isQuoting = /^\s*(&gt;|>)/.test(content) || /^\s*(&gt;|>)/.test(title);
-    const isForumQa = /\bhow (do|can|to) (i|we|you) (add|configure|setup|use|fix|implement|connect|access|install|solve)\b/i.test(fullText) ||
-                      /devforum\.zoom\.us|stackoverflow\.com/i.test(candidate.sourceUrl || '');
-    const isConsumerTool = /\b(calculator|converter|calculatorsoup|online tool|math calculator|autoclicker|auto clicker|game hack|cheat engine)\b/i.test(fullText) ||
-                           /opautoclicker\.com|sourceforge\.net/i.test(candidate.sourceUrl || '');
+    const isForumQa = /\b(ask hn|how (do|can|to) (i|we|you) (add|configure|setup|use|fix|implement|connect|access|install|solve))\b/i.test(fullText) ||
+                      /devforum\.zoom\.us|stackoverflow\.com/i.test(sourceUrl);
+    const isConsumerTool = /\b(calculator|converter|calculatorsoup|online tool|math calculator|autoclicker|auto clicker|game hack|cheat engine|dyno bot)\b/i.test(fullText) ||
+                           /opautoclicker\.com|sourceforge\.net/i.test(sourceUrl);
+    const isProductHomepage = /\b(welcome to our software website|download our software|a full-fledged .* with two modes|free automated .* tool)\b/i.test(fullText) ||
+                              /\b(features and download|download now|product features)\b/i.test(fullText);
     const isRepoBugIssue = /\b(issue #\d+|pull request|pr #\d+|merge branch|git commit|make lint|ci\/cd pipeline failed|unit tests? failing|stack trace|nullpointerexception|undefined is not a function|short links actually redirect)\b/i.test(fullText) ||
-                           (candidate.source === 'github' && /\/issues\/\d+/i.test(candidate.sourceUrl || '') && !/\b(bounty|paid|budget|\$|agency|rfp|hire)\b/i.test(fullText));
+                           (candidate.source === 'github' && /\/issues\/\d+/i.test(sourceUrl) && !/\b(bounty|paid|budget|\$|agency|rfp|hire)\b/i.test(fullText));
 
-    const discussionRegex = /\b(how (do|can) i learn|which (library|framework|stack|technology)|best (stack|framework|library|technology)|how much does a website cost|average (price|cost) for|researching .* costs|tutorial|career advice|programming question|what do you think of|i want to learn|recommend a good (react|developer)|can anyone recommend|i believe this is a .* way of thinking|seems to be a lot of overlap|in my opinion|from my experience|it just occurred to me|i was never able|my specialty was|i spent (years|most of that time)|that being said|to me, it's just|i suppose the one thing|speaking also as someone who|i like and believe in this|people were always able to)\b/i;
+    const discussionRegex = /\b(ask hn|which (frontend )?(framework|library|stack|technology) is (better|best)|how (do|can) i learn|which (library|framework|stack|technology)|best (stack|framework|library|technology)|how much does a website cost|average (price|cost) for|researching .* costs|tutorial|career advice|programming question|what do you think of|i want to learn|recommend a good (react|developer)|can anyone recommend|i believe this is a .* way of thinking|seems to be a lot of overlap|in my opinion|from my experience|it just occurred to me|i was never able|my specialty was|i spent (years|most of that time)|that being said|to me, it's just|i suppose the one thing|speaking also as someone who|i like and believe in this|people were always able to|what are your experiences\??)\b/i;
     
-    if (isQuoting || isForumQa || isConsumerTool || isRepoBugIssue || discussionRegex.test(fullText)) {
+    if (isProductHomepage || isConsumerTool) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'PRODUCT_OR_COMPANY_PAGE',
+        rejection_gate: 'GATE_3',
+        evidence_summary: 'Static consumer tool or software product homepage rather than a project inquiry',
+        is_client_side_project: false,
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
+    }
+
+    if (isQuoting || isForumQa || isRepoBugIssue || discussionRegex.test(fullText)) {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'GENERAL_DISCUSSION',
+        rejection_gate: 'GATE_3',
+        evidence_summary: 'Technical discussion, Q&A question, or codebase bug report without commercial hiring intent',
         is_client_side_project: false,
         has_actionable_contact: false,
         contact_type: 'none'
@@ -330,17 +408,18 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
 
     // ----------------------------------------------------
     // GATE 4: Hard Reject - Employment / Salaried Jobs / HR
-    // (Context-Aware: allows "salary calculation module", "hiring external agency")
     // ----------------------------------------------------
     const isFeatureSalary = /salary\s*(calculation|module|component|integration|slip|management|system)/i.test(fullText);
     const isExternalAgencyHiring = /hiring\s*(an?\s*)?(external\s*)?(development\s*)?(agency|firm|team|vendor|contractor)\s*(to|for)?/i.test(fullText);
 
-    const employmentRegex = /\b(software development engineer|sde\b|software engineer\s*[-—–]\s*(mobile|backend|frontend)|senior (software )?engineer|staff engineer|principal engineer|full[- ]?time (job|role|position|employee)?|permanent (role|position|employee)|annual ctc|ctc\s*[:=]|[\d.]+\s*lpa|job vacancy|job opening|notice period|immediate joiner|send your (resume|cv)|submit (resume|cv)|join (our|the) team|join our (growing )?engineering team|join our growing team|expanding our engineering team|hiring freshers?|freshers? (can apply|welcome|hiring)|pf\b|esi\b|hr manager|recruiter|recruitment|benefits package|401k|paid time off|pto|salary\s*[:=₹$]|operator\s*\([^\)]+\)|onsite preferred|w2 (role|position|project)|hybrid\s*\d+x|director\s*(of)?|vp\s*(of)?|head of\b)\b/i;
+    const employmentRegex = /\b(software development engineer|sde\b|software engineer\s*[-—–]\s*(mobile|backend|frontend)|senior (software )?engineer|staff engineer|principal engineer|full[- ]?time (job|role|position|employee)?|permanent (role|position|employee)|annual ctc|ctc\s*[:=]|[\d.]+\s*lpa|job vacancy|job opening|notice period|immediate joiner|send your (resume|cv)|submit (resume|cv)|join (our|the) team|join our (growing )?engineering team|join our growing team|expanding our engineering team|hiring freshers?|freshers? (can apply|welcome|hiring)|pf\b|esi\b|hr manager|recruiter|recruitment|benefits package|401k|paid time off|pto|salary\s*[:=₹$]|operator\s*\([^\)]+\)|onsite preferred|w2 (role|position|project)|hybrid\s*\d+x|director\s*(of)?|vp\s*(of)?|head of\b|\$\d+k salary)\b/i;
 
     if (!isFeatureSalary && !isExternalAgencyHiring && employmentRegex.test(fullText)) {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'EMPLOYMENT',
+        rejection_gate: 'GATE_4',
+        evidence_summary: 'Full-time salaried employment or internal employee recruitment',
         is_client_side_project: false,
         is_employment: true,
         has_actionable_contact: false,
@@ -349,14 +428,22 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     // ----------------------------------------------------
-    // GATE 5: Non-IT / Non-Project / Adult / Marketing Gigs Rejection
+    // GATE 5: Non-IT / Non-Project / Adult / Marketing Services Rejection
+    // Context-Aware: "marketing automation software" or "CRM software" is IT;
+    // marketing gigs, SEO campaigns, Instagram posting, VA are rejected.
     // ----------------------------------------------------
+    const isItDeliverableWithMarketing = /\b(marketing automation\s*(software|system|tool|platform|app)|email marketing\s*(engine|platform|software|api)|marketing\s*(dashboard|portal|crm|api))\b/i.test(fullText) ||
+                                         /\b(build|develop|create|code)\s*(custom\s*)?(marketing automation|automation software)\b/i.test(fullText);
+
     const isPayrollSoftware = /payroll\s*(system|software|module|app|platform)/i.test(fullText);
-    const nonItRegex = /\b(payroll|student assistant|receptionist|accountant|garment|fashion communication|escort|sales executive|telecaller|bpo|data entry|operator|marketer|marketers|marketing|social media marketing|copywriter|content writer|va\b|virtual assistant|video editor|thumbnail|voice actor|graphic designer for social media|posting on (instagram|tiktok|facebook|reddit))\b/i;
-    if ((!isPayrollSoftware && nonItRegex.test(title)) || (!isPayrollSoftware && nonItRegex.test(content.substring(0, 300)))) {
+    const nonItRegex = /\b(payroll|student assistant|receptionist|accountant|garment|fashion communication|escort|sales executive|telecaller|bpo|data entry|operator|marketer|marketers|marketing|social media marketing|copywriter|content writer|va\b|virtual assistant|video editor|thumbnail|voice actor|graphic designer for social media|posting on (instagram|tiktok|facebook|reddit)|manage instagram)\b/i;
+
+    if (!isItDeliverableWithMarketing && !isPayrollSoftware && (nonItRegex.test(title) || nonItRegex.test(content.substring(0, 300)))) {
       return {
         qualification_status: 'rejected',
-        rejection_reason: 'NOT_IT_PROJECT',
+        rejection_reason: 'NON_IT_SERVICE',
+        rejection_gate: 'GATE_5',
+        evidence_summary: 'Non-IT service offering or marketing/VA gig without custom software engineering deliverable',
         is_it_project: false,
         is_client_side_project: false,
         has_actionable_contact: false,
@@ -366,8 +453,21 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
 
     // ----------------------------------------------------
     // GATE 6: Client-Side Project Requirement Check
-    // Must contain evidence of an IT deliverable wanted
+    // Must contain evidence of an IT deliverable wanted AND buyer intent
     // ----------------------------------------------------
+    const pastCompletedProject = /\b(i completed last year|project i (built|created|developed|completed) last year|retrospective of a .* project|thoughts on architecture)\b/i.test(fullText);
+    if (pastCompletedProject) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'NO_PROJECT_REQUIREMENT',
+        rejection_gate: 'GATE_6',
+        evidence_summary: 'Retrospective of completed past work rather than an active commercial requirement',
+        is_client_side_project: false,
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
+    }
+
     const deliverableRegex = /\b(build|develop|create|redesign|revamp|implement|integrate|integration|migrate|mvp|saas|website|web app|mobile app|application|portal|dashboard|crm|erp|ecommerce|e-commerce|shopify|wordpress|woocommerce|flutter|react|node|api|automation|chatbot|voice agent|software|maintain|maintenance|bug fix|fix|project|appointment system|module|development team|customer portal)\b/i;
     const clientNeedRegex = /\b(need|needs|looking for|seeking|want|wants|hiring\s*(an?\s*)?(external\s*)?(developer|agency|team|freelancer|someone|vendor|contractor)?|rfp|scope of work|project|help integrating|development team for)\b/i;
 
@@ -378,6 +478,8 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       return {
         qualification_status: 'rejected',
         rejection_reason: 'NO_PROJECT_REQUIREMENT',
+        rejection_gate: 'GATE_6',
+        evidence_summary: 'Missing explicit IT deliverable requirement or client-side buyer intent',
         is_client_side_project: false,
         has_actionable_contact: false,
         contact_type: 'none'
@@ -386,22 +488,25 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
 
     // ----------------------------------------------------
     // GATE 7: Actionable Contactability Verification
+    // Tier A: Explicit Email / Phone / Explicit Business Contact Page (/contact, /rfp, /hire)
+    // Tier B: Public Profile Route (Reddit, GitHub, Twitter) if valid non-generic author exists
+    // Tier C: None -> Reject NO_ACTIONABLE_CONTACT.
+    // NOTE: Arbitrary sourceUrl or homepage URLs are NEVER allowed to satisfy contactability.
     // ----------------------------------------------------
-    // 1. Email check (allows standard domains including example.com / abc.com used in tests)
+    // 1. Email check
     const emailMatch = fullText.match(/\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/i);
     let validEmail = null;
     if (emailMatch && !emailMatch[1].includes('leadspy.app') && !emailMatch[1].includes('test.com')) {
       validEmail = emailMatch[1];
     }
 
-    // 2. Phone check (E.164, Indian standard, or US standard with spaces/dashes e.g. +1 555 123 4567)
-    // Strip URLs before checking phone numbers to avoid tweet IDs or URL numbers matching
+    // 2. Phone check
     const textWithoutUrls = fullText.replace(/https?:\/\/[^\s"'<>]+/gi, '');
     const phoneMatch = textWithoutUrls.match(/(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/) ||
                        textWithoutUrls.match(/(?:\+91[\-\s]?)?[6789]\d{9}\b/);
     const validPhone = phoneMatch ? phoneMatch[0].trim() : null;
 
-    // 3. Public business contact / company URL
+    // 3. Public business contact URL (must explicitly contain /contact, /apply, /hire, /rfp)
     const urlMatch = fullText.match(/https?:\/\/[^\s"'<>]+/gi);
     let publicBusinessContactUrl = null;
     let clientCompanyUrl = null;
@@ -418,7 +523,7 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       }
     }
 
-    // 4. Public Profile Message (Only if valid native author username exists on allowed community platforms)
+    // 4. Public Profile Message (Reddit / GitHub / Twitter)
     let hasPublicProfileRoute = false;
     let authorProfileUrl = candidate.authorProfileUrl || null;
     const author = candidate.author || '';
@@ -432,8 +537,7 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
         hasPublicProfileRoute = true;
         if (!authorProfileUrl) authorProfileUrl = `https://github.com/${author}`;
       } else if (candidate.source === 'hackernews') {
-        hasPublicProfileRoute = true;
-        if (!authorProfileUrl) authorProfileUrl = `https://news.ycombinator.com/user?id=${author}`;
+        // HN user profiles are strictly profile view unless email is in about, but we don't treat HN as direct DM unless email exists
       } else if (candidate.source === 'twitter' || candidate.source === 'x') {
         hasPublicProfileRoute = true;
         if (!authorProfileUrl) authorProfileUrl = `https://x.com/${author.replace('@', '')}`;
@@ -452,9 +556,6 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     } else if (publicBusinessContactUrl) {
       contactType = 'public_business_contact';
       contactValue = publicBusinessContactUrl;
-    } else if (clientCompanyUrl) {
-      contactType = 'public_company_website';
-      contactValue = clientCompanyUrl;
     } else if (hasPublicProfileRoute) {
       contactType = 'public_profile_message';
       contactValue = authorProfileUrl;
@@ -464,6 +565,8 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       return {
         qualification_status: 'rejected',
         rejection_reason: 'NO_ACTIONABLE_CONTACT',
+        rejection_gate: 'GATE_7',
+        evidence_summary: 'No valid email, phone, business contact page, or actionable native messaging profile found',
         is_client_side_project: true,
         has_actionable_contact: false,
         contact_type: 'none'
@@ -493,7 +596,6 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       category = 'SaaS';
     }
 
-    // Strict Location: null if not mentioned
     let clientLocation = null;
     if (/india|delhi|bangalore|bengaluru|mumbai|pune|hyderabad|noida|gurugram|gurgaon|chennai/i.test(fullText)) {
       if (/delhi|noida|gurugram|gurgaon/i.test(fullText)) clientLocation = 'Delhi NCR, India';
@@ -512,7 +614,6 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       clientLocation = 'Remote';
     }
 
-    // Strict Budget: null if not mentioned
     let budget = null;
     let budgetMin = null;
     let budgetMax = null;
@@ -544,6 +645,8 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     return {
       qualification_status: 'qualified',
       rejection_reason: null,
+      rejection_gate: null,
+      evidence_summary: 'Qualified commercial IT development requirement with verified contact channel',
       is_it_project: true,
       is_client_side_project: true,
       is_employment: false,
@@ -578,17 +681,42 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       contact_value: contactValue,
       relevanceScore: 88,
       contactabilityScore: contactType === 'email' ? 95 : (contactType === 'phone' ? 90 : 80),
+      qualification_evidence: {
+        it_deliverable_detected: true,
+        buyer_intent_detected: true,
+        contact_verified: true,
+        contact_channel: contactType
+      },
       postedAt: candidate.postedAt || new Date().toISOString(),
       discoveredAt: new Date().toISOString()
     };
   }
 
-  formatExtractedProject(candidate, llmResult) {
+  formatExtractedProject(candidate, llmResult, heuristicFallback) {
+    // If LLM says rejected or has no actionable contact, reject
     if (llmResult.qualification_status === 'rejected' || !llmResult.has_actionable_contact || llmResult.contact_type === 'none') {
       return {
         qualification_status: 'rejected',
         rejection_reason: llmResult.rejection_reason || 'NO_ACTIONABLE_CONTACT',
+        rejection_gate: 'GATE_7',
+        evidence_summary: 'Rejected by LLM: no actionable contact or requirement found',
         is_client_side_project: Boolean(llmResult.is_client_side_project),
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
+    }
+
+    // Ensure LLM does NOT hallucinate sourceUrl as contact
+    const contactType = heuristicFallback.contact_type || llmResult.contact_type || 'none';
+    const contactValue = heuristicFallback.contact_value || llmResult.contact_value || null;
+
+    if (contactType === 'none' || !contactValue) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'NO_ACTIONABLE_CONTACT',
+        rejection_gate: 'GATE_7',
+        evidence_summary: 'Deterministic verification rejected contact route',
+        is_client_side_project: true,
         has_actionable_contact: false,
         contact_type: 'none'
       };
@@ -597,6 +725,8 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     return {
       qualification_status: 'qualified',
       rejection_reason: null,
+      rejection_gate: null,
+      evidence_summary: 'Qualified commercial IT development requirement verified by hybrid engine',
       is_it_project: true,
       is_client_side_project: true,
       is_employment: false,
@@ -608,29 +738,35 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       title: llmResult.title || candidate.rawTitle,
       shortSummary: llmResult.short_summary || candidate.rawContent?.substring(0, 180) || candidate.rawTitle,
       originalDescription: candidate.rawContent || candidate.rawTitle,
-      category: llmResult.category || 'Web Development',
-      skills: Array.isArray(llmResult.skills) ? llmResult.skills : [],
-      features: Array.isArray(llmResult.features) ? llmResult.features : [],
-      clientName: llmResult.client_name || candidate.author || null,
+      category: llmResult.category || heuristicFallback.category || 'Web Development',
+      skills: Array.isArray(llmResult.skills) && llmResult.skills.length > 0 ? llmResult.skills : heuristicFallback.skills,
+      features: Array.isArray(llmResult.features) ? llmResult.features : ['Project Deliverable'],
+      clientName: llmResult.client_name || heuristicFallback.clientName,
       clientUsername: candidate.author || null,
-      clientEmail: llmResult.client_email || null,
-      clientPhone: llmResult.client_phone || null,
-      clientCompany: llmResult.client_company || null,
-      clientCompanyUrl: llmResult.client_company_url || null,
-      clientProfileUrl: candidate.authorProfileUrl || null,
-      clientLocation: llmResult.client_location || null,
-      budget: llmResult.budget || null,
-      budgetMin: llmResult.budget_min || null,
-      budgetMax: llmResult.budget_max || null,
-      currency: llmResult.currency || null,
-      projectType: llmResult.project_type || 'Contract',
-      projectIntent: llmResult.project_intent || 'Looking for Developer',
+      clientEmail: heuristicFallback.clientEmail || llmResult.client_email || null,
+      clientPhone: heuristicFallback.clientPhone || llmResult.client_phone || null,
+      clientCompany: llmResult.client_company || heuristicFallback.clientCompany,
+      clientCompanyUrl: heuristicFallback.clientCompanyUrl || llmResult.client_company_url || null,
+      clientProfileUrl: heuristicFallback.clientProfileUrl || candidate.authorProfileUrl || null,
+      clientLocation: llmResult.client_location || heuristicFallback.clientLocation,
+      budget: llmResult.budget || heuristicFallback.budget,
+      budgetMin: llmResult.budget_min || heuristicFallback.budgetMin,
+      budgetMax: llmResult.budget_max || heuristicFallback.budgetMax,
+      currency: llmResult.currency || heuristicFallback.currency,
+      projectType: llmResult.project_type || heuristicFallback.projectType,
+      projectIntent: llmResult.project_intent || heuristicFallback.projectIntent,
       has_actionable_contact: true,
-      contact_type: llmResult.contact_type || 'public_profile_message',
-      contact_value: llmResult.contact_value || candidate.sourceUrl,
+      contact_type: contactType,
+      contact_value: contactValue,
       relevanceScore: llmResult.relevance_score || 85,
       contactabilityScore: llmResult.contactability_score || 80,
       confidence: llmResult.confidence || 85,
+      qualification_evidence: {
+        it_deliverable_detected: true,
+        buyer_intent_detected: true,
+        contact_verified: true,
+        contact_channel: contactType
+      },
       postedAt: candidate.postedAt || new Date().toISOString(),
       discoveredAt: new Date().toISOString()
     };
