@@ -113,8 +113,8 @@ export default function ProjectsView() {
   };
 
   useEffect(() => {
-    loadProjects();
-    loadSaved();
+    // Fetch projects and saved pipeline simultaneously in parallel
+    Promise.all([loadProjects(), loadSaved()]);
   }, [activeCategory, activeLocation, activeFreshness, activeTechFilter]);
 
   // Handle Natural Language Search

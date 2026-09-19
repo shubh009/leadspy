@@ -290,6 +290,40 @@ export async function saveUserProject(userId = 'default-user', projectId, status
 }
 
 export async function getUserSavedProjects(userId = 'default-user') {
+  try {
+    if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY) {
+      const { data, error } = await supabase
+        .from('user_saved_projects')
+        .select(`
+          id,
+          user_id,
+          project_id,
+          status,
+          notes,
+          pitch_draft,
+          created_at,
+          master_projects (*)
+        `)
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+
+      if (!error && data) {
+        return data.map(row => ({
+          id: row.id,
+          user_id: row.user_id,
+          project_id: row.project_id,
+          status: row.status,
+          notes: row.notes,
+          pitch_draft: row.pitch_draft,
+          created_at: row.created_at,
+          project: row.master_projects ? formatProjectForClient(row.master_projects) : null
+        }));
+      }
+    }
+  } catch (err) {
+    // Fall back to memory store
+  }
+
   const savedList = IN_MEMORY_SAVED.filter(s => s.user_id === userId);
   return savedList.map(s => {
     const project = IN_MEMORY_PROJECTS.find(p => p.id === s.project_id);

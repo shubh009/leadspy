@@ -39,6 +39,8 @@ export async function listProjects(req, res) {
       sort
     });
 
+    res.set('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
+
     return res.json({
       success: true,
       data: result.projects,
@@ -131,6 +133,7 @@ export async function listSavedProjects(req, res) {
   try {
     const userId = req.headers['x-user-id'] || 'user-1';
     const saved = await getUserSavedProjects(userId);
+    res.set('Cache-Control', 'private, max-age=15');
     return res.json({ success: true, data: saved });
   } catch (error) {
     console.error('[ProjectController - listSaved Error]:', error);
