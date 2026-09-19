@@ -235,6 +235,23 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     // ----------------------------------------------------
+    // GATE 1B: Hard Reject - Foreign Country / Non-Offshore Lockout
+    // Rejects projects strictly requiring local US/UK/EU presence or forbidding overseas/offshore work
+    // Allows: Remote, Worldwide, Global, India, or unconstrained international projects.
+    // ----------------------------------------------------
+    const locationLockoutRegex = /\b(u\.?s\.?\s*(based|citizens?|residents?|only)\s*(only|freelancers?|developers?|engineers?)?|us\s+only|usa\s+only|must be in (the\s+)?(us|usa|united states|uk|canada|europe)|must be (located in|based in) (the\s+)?(us|usa|united states|uk|canada|europe)|(uk|canada|europe|australia)\s+only|(uk|canada|europe|australia)\s+based\s+only|no offshore|no overseas|no agency offshore|local candidates only|onsite only in\s+[a-z]+)\b/i;
+
+    if (locationLockoutRegex.test(fullText)) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'RESTRICTED_LOCATION_NON_OFFSHORE',
+        is_client_side_project: false,
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
+    }
+
+    // ----------------------------------------------------
     // GATE 2: Hard Reject - Internship / Trainee
     // (Context-Aware: allows "internship management portal/app")
     // ----------------------------------------------------
