@@ -12,65 +12,29 @@ export class HackerNewsAdapter extends BaseAdapter {
 
   async fetchCandidates(options = {}) {
     const candidates = [];
+    const thirtyDaysAgo = Math.floor(Date.now() / 1000) - (30 * 86400);
 
     try {
-      // 1. Fetch user 'whoishiring' submitted stories
-      const userRes = await fetch(`${this.hnApiBase}/user/whoishiring.json`, {
-        signal: AbortSignal.timeout(6000)
-      });
+      // 1. Fetch recent 'whoishiring' threads from Algolia with strict 30-day cutoff
+      const searchUrl = `https://hn.algolia.com/api/v1/search_by_date?query="SEEKING FREELANCER"&tags=comment&numericFilters=created_at_i>${thirtyDaysAgo}&hitsPerPage=15`;
+      const res = await fetch(searchUrl, { signal: AbortSignal.timeout(6000) });
 
-      if (userRes.ok) {
-        const userData = await userRes.json();
-        const submitted = userData?.submitted?.slice(0, 8) || [];
+      if (res.ok) {
+        const data = await res.json();
+        for (const h of (data.hits || [])) {
+          const text = (h.comment_text || '').replace(/<[^>]*>?/gm, ' ').replace(/&#x27;/g, "'").replace(/&amp;/g, '&').replace(/&quot;/g, '"');
+          const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+          const title = lines[0]?.substring(0, 100) || 'Hacker News Project Opportunity';
 
-        for (const storyId of submitted) {
-          const itemRes = await fetch(`${this.hnApiBase}/item/${storyId}.json`, {
-            signal: AbortSignal.timeout(4000)
-          });
-          if (!itemRes.ok) continue;
-          const item = await itemRes.json();
-
-          // Target "Seeking Freelancer" or "Who is hiring"
-          const title = (item?.title || '').toLowerCase();
-          if (title.includes('seeking freelancer') || title.includes('who is hiring')) {
-            const kids = item.kids?.slice(0, 20) || [];
-            
-            for (const commentId of kids) {
-              const commRes = await fetch(`${this.hnApiBase}/item/${commentId}.json`, {
-                signal: AbortSignal.timeout(3000)
-              });
-              if (!commRes.ok) continue;
-              const comm = await commRes.json();
-
-              if (!comm || comm.deleted || !comm.text) continue;
-
-              // Filter for hiring comments vs job seeker
-              const rawText = comm.text.replace(/<[^>]*>?/gm, ' ');
-              const isHiring = rawText.toLowerCase().includes('seeking freelancer') ||
-                               rawText.toLowerCase().includes('hiring') ||
-                               rawText.toLowerCase().includes('contract') ||
-                               rawText.toLowerCase().includes('freelance');
-
-              if (!isHiring) continue;
-
-              // Extract first line as title
-              const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
-              const extractedTitle = lines[0]?.substring(0, 100) || 'Hacker News Project Opportunity';
-
-              candidates.push(this.normalizeCandidate({
-                id: `hn-${comm.id}`,
-                url: `https://news.ycombinator.com/item?id=${comm.id}`,
-                title: extractedTitle,
-                content: rawText,
-                author: comm.by || 'HNFounder',
-                authorProfileUrl: `https://news.ycombinator.com/user?id=${comm.by}`,
-                postedAt: new Date(comm.time * 1000).toISOString()
-              }));
-
-              if (candidates.length >= 10) break;
-            }
-          }
-          if (candidates.length >= 10) break;
+          candidates.push(this.normalizeCandidate({
+            id: `hn-${h.objectID}`,
+            url: `https://news.ycombinator.com/item?id=${h.objectID}`,
+            title: title,
+            content: text,
+            author: h.author || 'HN Client',
+            authorProfileUrl: `https://news.ycombinator.com/user?id=${h.author}`,
+            postedAt: h.created_at || new Date().toISOString()
+          }));
         }
       }
     } catch (err) {
