@@ -1,19 +1,25 @@
 /**
- * LeadSpy Dynamic Query & Dork Generator (Layer 1)
- * Generates platform-specific dorks and general web discovery queries.
+ * LeadSpy Query Generator Interface
+ * File: server/projects/sources/queryGenerator.js
+ * 
+ * Re-exports from the centralized projectQueryLibrary (Single Source of Truth)
+ * and provides seamless compatibility with QueryRotatorService.
  */
 
+import { 
+  projectQueryLibrary, 
+  QUERY_PRIORITY, 
+  composeDynamicQueries, 
+  applySiteFilter,
+  TARGET_PLATFORM_DOMAINS 
+} from '../config/projectQueryLibrary.js';
+
+import { QueryRotatorService } from '../services/queryRotatorService.js';
+
+// Backward compatibility exports
 export const CORE_INTENT_QUERIES = [
-  'need someone to build a website',
-  'looking for a web development agency',
-  'need a development team',
-  'looking for software development agency',
-  'need someone to build an MVP',
-  'looking for mobile app development agency',
-  'need someone to build a SaaS',
-  'need website redesign',
-  'looking for AI development agency',
-  'need someone to build our platform'
+  ...projectQueryLibrary.generic.filter(q => q.priority === QUERY_PRIORITY.HIGH).map(q => q.query),
+  ...projectQueryLibrary.agencyOutsourcing.map(q => q.query)
 ];
 
 export const PLATFORM_DORKS = [
@@ -43,23 +49,29 @@ export const PLATFORM_DORKS = [
 ];
 
 /**
- * Generate a combined list of search queries with optional platform filter
+ * Generate a combined list of search queries with optional platform filter or rotator cycle
  */
 export function generateSearchQueries(options = {}) {
-  const { platform = null, limit = 20 } = options;
-  let queries = [];
+  const { platform = null, limit = 20, cycle = 1, categories = null } = options;
 
   if (platform) {
-    queries = PLATFORM_DORKS
+    const list = PLATFORM_DORKS
       .filter(p => p.platform.toLowerCase() === platform.toLowerCase())
       .map(p => p.dork);
-  } else {
-    // Interleave platform dorks and core intent queries
-    queries = [
-      ...PLATFORM_DORKS.map(p => p.dork),
-      ...CORE_INTENT_QUERIES
-    ];
+    return limit ? list.slice(0, limit) : list;
   }
 
-  return limit ? queries.slice(0, limit) : queries;
+  // Use QueryRotatorService for systematic query selection and prioritization
+  const rotator = new QueryRotatorService({ batchSize: limit, cycle, categories });
+  const selected = rotator.getQueriesForCycle();
+  return selected.map(s => s.query);
 }
+
+export { 
+  projectQueryLibrary, 
+  QUERY_PRIORITY, 
+  composeDynamicQueries, 
+  applySiteFilter,
+  TARGET_PLATFORM_DOMAINS,
+  QueryRotatorService 
+};

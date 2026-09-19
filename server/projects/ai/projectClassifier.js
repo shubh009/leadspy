@@ -252,11 +252,15 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     // ----------------------------------------------------
-    // GATE 3: Hard Reject - General Discussion / Learning / Comment Quotes
+    // GATE 3: Hard Reject - General Discussion / Learning / Comment Quotes / Technical Q&A
     // ----------------------------------------------------
     const isQuoting = /^\s*(&gt;|>)/.test(content) || /^\s*(&gt;|>)/.test(title);
+    const isForumQa = /\bhow (do|can|to) (i|we|you) (add|configure|setup|use|fix|implement|connect|access|install|solve)\b/i.test(fullText) ||
+                      /devforum\.zoom\.us|stackoverflow\.com/i.test(candidate.sourceUrl || '');
+    const isConsumerTool = /\b(calculator|converter|calculatorsoup|online tool|math calculator)\b/i.test(fullText);
     const discussionRegex = /\b(how (do|can) i learn|which (library|framework|stack|technology)|best (stack|framework|library|technology)|how much does a website cost|average (price|cost) for|researching .* costs|tutorial|career advice|programming question|what do you think of|i want to learn|recommend a good (react|developer)|can anyone recommend|i believe this is a .* way of thinking|seems to be a lot of overlap|in my opinion|from my experience|it just occurred to me|i was never able|my specialty was|i spent (years|most of that time)|that being said|to me, it's just|i suppose the one thing|speaking also as someone who|i like and believe in this)\b/i;
-    if (isQuoting || discussionRegex.test(fullText)) {
+    
+    if (isQuoting || isForumQa || isConsumerTool || discussionRegex.test(fullText)) {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'GENERAL_DISCUSSION',
