@@ -177,6 +177,26 @@ export default function ProjectsView() {
     return savedProjects.some(s => s.project_id === projId || s.project?.id === projId);
   };
 
+  const handlePrevProject = () => {
+    if (!selectedProject || projects.length === 0) return;
+    const currentIndex = projects.findIndex(p => p.id === selectedProject.id);
+    if (currentIndex > 0) {
+      setSelectedProject(projects[currentIndex - 1]);
+    }
+  };
+
+  const handleNextProject = () => {
+    if (!selectedProject || projects.length === 0) return;
+    const currentIndex = projects.findIndex(p => p.id === selectedProject.id);
+    if (currentIndex >= 0 && currentIndex < projects.length - 1) {
+      setSelectedProject(projects[currentIndex + 1]);
+    }
+  };
+
+  const currentProjectIndex = selectedProject ? projects.findIndex(p => p.id === selectedProject.id) : -1;
+  const hasPrevProject = currentProjectIndex > 0;
+  const hasNextProject = currentProjectIndex >= 0 && currentProjectIndex < projects.length - 1;
+
   const clearFilters = () => {
     setNlQuery('');
     setActiveCategory('all');
@@ -515,6 +535,8 @@ export default function ProjectsView() {
           onClose={() => setSelectedProject(null)}
           onSave={handleSaveToggle}
           isSaved={isProjectSaved(selectedProject.id)}
+          onPrev={hasPrevProject ? handlePrevProject : null}
+          onNext={hasNextProject ? handleNextProject : null}
         />
       )}
 

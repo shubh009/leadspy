@@ -3,29 +3,39 @@ import {
   X, 
   ExternalLink, 
   Mail, 
-  MessageSquare, 
   Bookmark, 
   Check, 
   Clock, 
   MapPin, 
   DollarSign, 
   Sparkles, 
-  Layers, 
-  ShieldCheck,
-  Copy,
-  Send,
-  FileText,
-  Building,
-  Target,
-  Briefcase
+  ShieldCheck, 
+  ChevronLeft, 
+  ChevronRight, 
+  Send, 
+  Calendar, 
+  FileText, 
+  UserPlus, 
+  CheckCircle2, 
+  Flame, 
+  Lightbulb, 
+  Compass, 
+  Code2, 
+  Tag, 
+  Layers 
 } from 'lucide-react';
 
-export default function ProjectDetailModal({ project, onClose, onSave, isSaved = false }) {
-  const [activeTab, setActiveTab] = useState('breakdown'); // 'breakdown' | 'source' | 'pitch'
+export default function ProjectDetailModal({ 
+  project, 
+  onClose, 
+  onSave, 
+  isSaved = false,
+  onPrev,
+  onNext
+}) {
   const [copiedEmail, setCopiedEmail] = useState(false);
-  const [copiedPitch, setCopiedPitch] = useState(false);
-  const [copiedText, setCopiedText] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [isFollowing, setIsFollowing] = useState(false);
 
   if (!project) return null;
 
@@ -33,30 +43,6 @@ export default function ProjectDetailModal({ project, onClose, onSave, isSaved =
     navigator.clipboard.writeText(email);
     setCopiedEmail(true);
     setTimeout(() => setCopiedEmail(false), 2000);
-  };
-
-  const handleCopyText = (text) => {
-    navigator.clipboard.writeText(text);
-    setCopiedText(true);
-    setTimeout(() => setCopiedText(false), 2000);
-  };
-
-  const handleCopyPitch = () => {
-    const clientGreeting = project.clientName || 'there';
-    const pitchText = `Hi ${clientGreeting},
-
-I saw your recent post regarding "${project.title}" on ${project.source || 'the web'} and wanted to reach out directly.
-
-Our team specializes in ${project.category || 'software development'} (${project.skills?.slice(0, 3).join(', ') || 'modern tech stack'}). We have delivered similar solutions with rapid turnarounds and high engineering standards.
-
-Would you be open to a quick 10-minute chat or exchanging a few details over email to see how we can help you build this out efficiently?
-
-Best regards,
-LeadSpy Partner Team`;
-
-    navigator.clipboard.writeText(pitchText);
-    setCopiedPitch(true);
-    setTimeout(() => setCopiedPitch(false), 2000);
   };
 
   const handleSaveClick = async () => {
@@ -68,366 +54,445 @@ LeadSpy Partner Team`;
     }
   };
 
-  // Helper to structure formatted readable text
-  const cleanDescription = (project.description || project.summary || '')
-    .replace(/\\n/g, '\n')
-    .trim();
+  // Helper to extract clean requirements list
+  const fullDescription = (project.description || project.originalDescription || project.summary || '').trim();
+  const rawBullets = fullDescription
+    .split(/\n+|\.\s+(?=[A-Z])/)
+    .map(s => s.replace(/^[-•*–—\d.)\s]+/, '').trim())
+    .filter(s => s.length > 20 && !s.toLowerCase().includes('contact') && !s.toLowerCase().includes('http'));
 
-  const formattedParagraphs = cleanDescription
-    .split(/\n{2,}|\.\s+(?=[A-Z])/)
-    .map(p => p.trim())
-    .filter(p => p.length > 15);
+  const requirementBullets = rawBullets.length > 0 ? rawBullets.slice(0, 5) : [
+    `Implement core ${project.category || 'software'} functionality according to client specification`,
+    `Ensure responsive, high-performance, and reliable execution`,
+    `Maintain modern architecture and clean coding standards`,
+    `Seamless integration with client workflow and APIs`,
+    `Provide documentation and delivery support`
+  ];
+
+  // Client initial for avatar
+  const clientDisplayName = project.clientName || project.author || 'Client';
+  const clientInitial = clientDisplayName.charAt(0).toUpperCase() || 'C';
+
+  // Issue or Post ID snippet
+  const postIdNumber = (project.sourcePostId || '').replace(/\D/g, '').slice(-4) || '195';
+
+  // Primary contact action URL & Label
+  let contactUrl = project.sourceUrl;
+  let contactLabel = `Contact ${clientDisplayName}`;
+  let contactSubtext = `Open ${project.source || 'source'} discussion`;
+
+  if (project.contactType === 'email' && project.clientEmail) {
+    contactUrl = `mailto:${project.clientEmail}?subject=Regarding%20your%20${encodeURIComponent(project.title)}&body=Hi%20${encodeURIComponent(clientDisplayName)},%0D%0A%0D%0AI%20saw%20your%20requirement%20for%20${encodeURIComponent(project.title)}...`;
+    contactLabel = `Email ${clientDisplayName}`;
+    contactSubtext = project.clientEmail;
+  } else if (project.contactType === 'public_profile_message') {
+    contactUrl = project.clientProfileUrl || project.sourceUrl;
+    contactLabel = `Message ${clientDisplayName}`;
+    contactSubtext = `Direct profile outreach on ${project.source}`;
+  } else if (project.clientCompanyUrl || project.contactValue) {
+    contactUrl = project.clientCompanyUrl || project.contactValue;
+    contactLabel = `Visit ${project.clientCompany || 'Company'} Page`;
+    contactSubtext = `Verified business portal`;
+  }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
-      <div className="bg-[#12141e] border border-[#26293b] rounded-2xl w-full max-w-5xl max-h-[92vh] flex flex-col shadow-2xl overflow-hidden text-gray-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/65 backdrop-blur-sm overflow-y-auto animate-in fade-in duration-150">
+      <div className="bg-[#f8faff] text-gray-800 rounded-3xl w-full max-w-5xl shadow-2xl overflow-hidden border border-white/60 my-auto flex flex-col font-sans">
         
-        {/* Top Bar / Header */}
-        <div className="p-5 sm:px-8 border-b border-[#26293b] bg-[#161826]/70 flex items-start justify-between gap-4">
-          <div className="space-y-2 max-w-3xl">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="px-3 py-1 rounded-lg text-xs font-semibold bg-orange-500/15 text-orange-400 border border-orange-500/30 tracking-wide">
-                {project.category}
-              </span>
-              <span className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 ${
-                project.freshnessBadge === 'Just Posted'
-                  ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                  : 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30'
-              }`}>
-                <Clock className="w-3.5 h-3.5" />
-                {project.freshnessBadge} • {project.timeAgo}
-              </span>
-              <span className="px-3 py-1 rounded-lg text-xs font-medium bg-[#1d2030] text-gray-300 border border-white/5 capitalize">
-                Via {project.source}
-              </span>
-              {project.intent && (
-                <span className="px-2.5 py-1 rounded-lg text-xs font-medium bg-purple-500/10 text-purple-300 border border-purple-500/20">
-                  {project.intent}
-                </span>
+        {/* ======================================================== */}
+        {/* TOP BAR / HEADER */}
+        {/* ======================================================== */}
+        <div className="p-4 sm:px-8 bg-white border-b border-gray-200/80 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            {/* Source Brand Icon */}
+            <div className="w-10 h-10 rounded-full bg-gray-900 text-white flex items-center justify-center shrink-0 shadow-sm">
+              {project.source === 'reddit' ? (
+                <span className="font-bold text-lg text-orange-500">r/</span>
+              ) : project.source === 'hackernews' ? (
+                <span className="font-bold text-lg text-orange-400">Y</span>
+              ) : (
+                <Code2 className="w-5 h-5 text-white" />
               )}
             </div>
 
-            <h2 className="text-xl sm:text-2xl font-bold text-white leading-snug tracking-tight">
-              {project.title}
-            </h2>
+            {/* Breadcrumb info */}
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-sm font-semibold text-gray-800 flex-wrap">
+                <span className="capitalize">{project.source || 'GitHub'} Issue</span>
+                <span className="text-gray-300">•</span>
+                <span className="text-gray-600 truncate">{project.author || 'vogler75/monster-mq'}</span>
+                <span className="text-gray-300">•</span>
+                <span className="text-gray-500 font-normal">#{postIdNumber}</span>
+              </div>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Discovered {project.timeAgo || 'recently'} • Posted {project.freshnessBadge || 'Fresh'}
+              </p>
+            </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <a 
-              href={project.sourceUrl} 
-              target="_blank" 
+          {/* Action buttons on the right */}
+          <div className="flex items-center gap-2 shrink-0">
+            {/* Prev / Next navigation */}
+            <div className="flex items-center bg-gray-100/80 rounded-xl p-1 border border-gray-200/60">
+              <button 
+                onClick={onPrev}
+                disabled={!onPrev}
+                className="p-1.5 rounded-lg hover:bg-white text-gray-600 hover:text-gray-900 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                title="Previous Project"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <button 
+                onClick={onNext}
+                disabled={!onNext}
+                className="p-1.5 rounded-lg hover:bg-white text-gray-600 hover:text-gray-900 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                title="Next Project"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* View Original button */}
+            <a
+              href={project.sourceUrl}
+              target="_blank"
               rel="noreferrer"
-              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-gray-300 border border-white/10 transition"
-              title="Open original live URL"
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-white hover:bg-gray-50 text-gray-700 text-xs font-semibold border border-gray-300/80 shadow-sm transition"
             >
-              <ExternalLink className="w-3.5 h-3.5 text-cyan-400" />
-              Source Post
+              <span>View Original</span>
+              <ExternalLink className="w-3.5 h-3.5 text-gray-500" />
             </a>
+
+            {/* Close modal */}
             <button 
               onClick={onClose}
-              className="text-gray-400 hover:text-white p-2 rounded-xl hover:bg-white/5 transition"
+              className="p-2 rounded-xl text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition"
             >
               <X className="w-5 h-5" />
             </button>
           </div>
         </div>
 
-        {/* Navigation Tabs */}
-        <div className="flex items-center gap-2 px-6 sm:px-8 border-b border-[#26293b] bg-[#141624]">
-          <button
-            onClick={() => setActiveTab('breakdown')}
-            className={`flex items-center gap-2 py-3 px-4 text-xs sm:text-sm font-semibold border-b-2 transition cursor-pointer ${
-              activeTab === 'breakdown'
-                ? 'border-orange-500 text-orange-400'
-                : 'border-transparent text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            <Sparkles className="w-4 h-4" />
-            Interactive Brief
-          </button>
-
-          <button
-            onClick={() => setActiveTab('source')}
-            className={`flex items-center gap-2 py-3 px-4 text-xs sm:text-sm font-semibold border-b-2 transition cursor-pointer ${
-              activeTab === 'source'
-                ? 'border-orange-500 text-orange-400'
-                : 'border-transparent text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            <FileText className="w-4 h-4" />
-            Formatted Original Post
-          </button>
-
-          <button
-            onClick={() => setActiveTab('pitch')}
-            className={`flex items-center gap-2 py-3 px-4 text-xs sm:text-sm font-semibold border-b-2 transition cursor-pointer ${
-              activeTab === 'pitch'
-                ? 'border-orange-500 text-orange-400'
-                : 'border-transparent text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            <Send className="w-4 h-4 text-amber-400" />
-            Ready-to-Send Pitch
-          </button>
-        </div>
-
-        {/* 2-Column Responsive Body */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 flex-1 overflow-hidden">
+        {/* ======================================================== */}
+        {/* 2-COLUMN MODAL BODY */}
+        {/* ======================================================== */}
+        <div className="p-5 sm:p-8 grid grid-cols-1 lg:grid-cols-12 gap-6 overflow-y-auto max-h-[82vh] bg-[#f8faff]">
           
-          {/* Main Content Area (7 Cols) */}
-          <div className="lg:col-span-8 p-6 sm:p-8 overflow-y-auto space-y-6 border-b lg:border-b-0 lg:border-r border-[#26293b] custom-scrollbar">
+          {/* ------------------------------------------------------ */}
+          {/* LEFT MAIN CONTENT (approx 65% / 8 Cols) */}
+          {/* ------------------------------------------------------ */}
+          <div className="lg:col-span-8 space-y-5">
             
-            {activeTab === 'breakdown' && (
-              <div className="space-y-6 animate-in fade-in duration-150">
-                {/* Executive Summary Card */}
-                <div className="p-5 rounded-2xl bg-gradient-to-br from-orange-500/10 via-amber-500/5 to-transparent border border-orange-500/20 space-y-3">
-                  <div className="flex items-center gap-2 text-orange-400 font-semibold text-xs uppercase tracking-wider">
-                    <Target className="w-4 h-4" />
-                    Core Project Objective
-                  </div>
-                  <p className="text-gray-100 text-sm sm:text-base leading-relaxed font-normal">
-                    {project.summary || cleanDescription.substring(0, 300)}
+            {/* Tags / Badges Row */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#fff4eb] text-[#e65100] border border-[#ffe0cc]">
+                🏷️ {project.category || 'Web Development'}
+              </span>
+              <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#e8f5e9] text-[#2e7d32] border border-[#c8e6c9]">
+                💻 {project.subcategory || 'Open Source'}
+              </span>
+              <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#f3e5f5] text-[#7b1fa2] border border-[#e1bee7]">
+                {project.intent || 'Looking for Agency / Developer'}
+              </span>
+              <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#e3f2fd] text-[#1565c0] border border-[#bbdefb] flex items-center gap-1">
+                <Clock className="w-3.5 h-3.5" />
+                {project.freshnessBadge || 'Fresh'} ({project.timeAgo || '3 days ago'})
+              </span>
+            </div>
+
+            {/* Main Project Title */}
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-[#111827] tracking-tight leading-snug">
+              {project.title}
+            </h1>
+
+            {/* Overview / Introduction Paragraph */}
+            <p className="text-gray-600 text-sm sm:text-base leading-relaxed font-normal">
+              {project.summary || fullDescription.substring(0, 260)}
+            </p>
+
+            {/* Quick Summary Card */}
+            <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-purple-50/90 via-indigo-50/50 to-blue-50/30 border border-purple-100/80 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-indigo-600 font-bold text-sm">
+                  <Sparkles className="w-4 h-4" />
+                  <span>Quick Summary</span>
+                </div>
+                <p className="text-gray-600 text-xs sm:text-sm leading-relaxed max-w-xl">
+                  {fullDescription.length > 250 
+                    ? fullDescription.substring(0, 220) + '...'
+                    : fullDescription || 'Well-defined client scope requiring experienced development team.'}
+                </p>
+              </div>
+
+              {/* Good Fit Pill Card */}
+              <div className="bg-white/90 border border-purple-100 shadow-sm rounded-xl px-3.5 py-2 flex items-center gap-2.5 shrink-0 self-start sm:self-center">
+                <div className="w-7 h-7 rounded-lg bg-amber-50 text-amber-500 flex items-center justify-center">
+                  <Lightbulb className="w-4 h-4" />
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-gray-900 leading-tight">Good Fit</p>
+                  <p className="text-[10px] text-gray-500 font-medium leading-tight">
+                    For {project.skills?.slice(0, 2).join(' / ') || 'Development'} Experts
                   </p>
                 </div>
+              </div>
+            </div>
 
-                {/* Key Deliverables & Scope */}
-                <div className="space-y-3">
-                  <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-2">
-                    <Briefcase className="w-4 h-4 text-indigo-400" />
-                    Extracted Scope & Requirements
-                  </h4>
-                  <div className="space-y-2.5">
-                    {formattedParagraphs.slice(0, 4).map((para, i) => (
-                      <div key={i} className="p-3.5 rounded-xl bg-[#171926] border border-white/5 flex items-start gap-3">
-                        <span className="w-5 h-5 rounded-full bg-orange-500/20 text-orange-400 flex items-center justify-center text-[11px] font-bold shrink-0 mt-0.5">
-                          {i + 1}
-                        </span>
-                        <p className="text-xs sm:text-sm text-gray-300 leading-relaxed">
-                          {para}
-                        </p>
-                      </div>
-                    ))}
+            {/* Detailed Requirements Card */}
+            <div className="p-5 sm:p-6 rounded-2xl bg-[#eff6ff]/70 border border-blue-100 shadow-sm space-y-3.5">
+              <div className="flex items-center gap-2 text-gray-900 font-bold text-sm">
+                <Calendar className="w-4 h-4 text-blue-600" />
+                <span>Detailed Requirements</span>
+              </div>
+              <ul className="space-y-2.5">
+                {requirementBullets.map((bullet, idx) => (
+                  <li key={idx} className="flex items-start gap-3">
+                    <span className="w-2 h-2 rounded-full bg-blue-500 mt-2 shrink-0" />
+                    <span className="text-xs sm:text-sm text-gray-700 leading-relaxed font-normal">
+                      {bullet}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {/* Bottom 2 Grid Cards: Tech Stack & Ideal For */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              
+              {/* Tech Stack / Skills */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-white border border-gray-200/80 shadow-sm space-y-3">
+                <div className="flex items-center gap-2 text-gray-900 font-bold text-sm">
+                  <Layers className="w-4 h-4 text-blue-600" />
+                  <span>Tech Stack / Skills</span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {project.skills && project.skills.length > 0 ? (
+                    project.skills.map((skill, idx) => (
+                      <span 
+                        key={idx}
+                        className="px-3 py-1 rounded-xl text-xs font-semibold bg-gray-50 text-gray-700 border border-gray-200/70 shadow-2xs"
+                      >
+                        {skill}
+                      </span>
+                    ))
+                  ) : (
+                    ['Full-Stack', 'APIs', 'Architecture', 'Clean Code'].map((skill, idx) => (
+                      <span 
+                        key={idx}
+                        className="px-3 py-1 rounded-xl text-xs font-semibold bg-gray-50 text-gray-700 border border-gray-200/70"
+                      >
+                        {skill}
+                      </span>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Ideal For */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-white border border-gray-200/80 shadow-sm space-y-3">
+                <div className="flex items-center gap-2 text-gray-900 font-bold text-sm">
+                  <Compass className="w-4 h-4 text-blue-600" />
+                  <span>Ideal For</span>
+                </div>
+                <div className="space-y-2 text-xs sm:text-sm text-gray-700">
+                  <div className="flex items-center gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                    <span>Developers with {project.skills?.[0] || 'domain'} experience</span>
+                  </div>
+                  <div className="flex items-center gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                    <span>Experience in {project.category || 'software'} systems</span>
+                  </div>
+                  <div className="flex items-center gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                    <span>Proven agency / contractor track record</span>
+                  </div>
+                  <div className="flex items-center gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                    <span>Familiar with {project.skills?.slice(0, 2).join(', ') || 'modern'} architecture</span>
                   </div>
                 </div>
-
-                {/* Tech Stack & Required Skills */}
-                <div className="space-y-3">
-                  <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-2">
-                    <Layers className="w-4 h-4 text-cyan-400" />
-                    Technologies & Skills Detected
-                  </h4>
-                  <div className="flex flex-wrap gap-2">
-                    {project.skills && project.skills.length > 0 ? (
-                      project.skills.map((skill, idx) => (
-                        <span 
-                          key={idx} 
-                          className="px-3 py-1.5 rounded-xl text-xs font-medium bg-[#1d2030] text-orange-300 border border-orange-500/20 shadow-sm"
-                        >
-                          {skill}
-                        </span>
-                      ))
-                    ) : (
-                      <span className="text-xs text-gray-500 italic">No specific frameworks declared (Open to stack recommendations)</span>
-                    )}
-                  </div>
-                </div>
               </div>
-            )}
 
-            {activeTab === 'source' && (
-              <div className="space-y-4 animate-in fade-in duration-150">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-gray-400 uppercase tracking-wider font-semibold">
-                    Original Source Document
-                  </span>
-                  <button
-                    onClick={() => handleCopyText(cleanDescription)}
-                    className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-gray-300 transition"
-                  >
-                    {copiedText ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    {copiedText ? 'Copied' : 'Copy Text'}
-                  </button>
-                </div>
-                
-                <div className="p-5 rounded-2xl bg-[#0e1017] border border-white/5 space-y-3">
-                  {cleanDescription.split('\n').map((line, idx) => {
-                    const trimmed = line.trim();
-                    if (!trimmed) return <div key={idx} className="h-2" />;
-                    return (
-                      <p key={idx} className="text-xs sm:text-sm text-gray-300 leading-relaxed font-sans">
-                        {trimmed}
-                      </p>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'pitch' && (
-              <div className="space-y-4 animate-in fade-in duration-150">
-                <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 flex items-center justify-between">
-                  <span>💡 1-Click Tailored Outreach Proposal for this client</span>
-                  <button
-                    onClick={handleCopyPitch}
-                    className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-500 text-black font-semibold text-xs hover:bg-amber-400 transition"
-                  >
-                    {copiedPitch ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    {copiedPitch ? 'Copied Pitch!' : 'Copy Proposal Draft'}
-                  </button>
-                </div>
-
-                <div className="p-5 rounded-2xl bg-[#0e1017] border border-white/10 text-gray-200 text-xs sm:text-sm leading-relaxed whitespace-pre-line font-mono">
-{`Hi ${project.clientName || 'there'},
-
-I saw your recent post regarding "${project.title}" on ${project.source || 'the web'} and wanted to reach out directly.
-
-Our team specializes in ${project.category || 'software development'} (${project.skills?.slice(0, 3).join(', ') || 'modern tech stack'}). We have delivered similar solutions with rapid turnarounds and high engineering standards.
-
-Would you be open to a quick 10-minute chat or exchanging a few details over email to see how we can help you build this out efficiently?
-
-Best regards,
-LeadSpy Partner Team`}
-                </div>
-              </div>
-            )}
+            </div>
 
           </div>
 
-          {/* Right Sidebar (4 Cols) - Client Hub & Commercials */}
-          <div className="lg:col-span-4 p-6 sm:p-8 bg-[#141624]/60 space-y-6 overflow-y-auto custom-scrollbar">
+          {/* ------------------------------------------------------ */}
+          {/* RIGHT SIDEBAR (approx 35% / 4 Cols) */}
+          {/* ------------------------------------------------------ */}
+          <div className="lg:col-span-4 space-y-4">
             
-            {/* Commercials Card */}
-            <div className="space-y-3">
-              <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
-                Commercial Summary
-              </h4>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="p-3.5 rounded-xl bg-[#1b1e2c] border border-white/5 space-y-1">
-                  <span className="text-[11px] text-gray-400 flex items-center gap-1">
-                    <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
-                    Budget
-                  </span>
-                  <p className="font-bold text-white text-sm">{project.budget || 'Negotiable'}</p>
-                  <p className="text-[10px] text-gray-400">{project.projectType || 'Contract'}</p>
+            {/* 1. Lead Score Card */}
+            <div className="p-5 rounded-2xl bg-white border border-gray-200/80 shadow-sm space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-3">
+                  {/* Circle Ring Score Badge */}
+                  <div className="w-14 h-14 rounded-full border-4 border-emerald-400 bg-emerald-50 flex items-center justify-center text-emerald-600 shrink-0">
+                    <ShieldCheck className="w-7 h-7 text-emerald-500" />
+                  </div>
+                  <div>
+                    <span className="text-[11px] text-gray-400 uppercase tracking-wider font-semibold block">
+                      Lead Score
+                    </span>
+                    <div className="flex items-baseline gap-1">
+                      <span className="text-2xl font-extrabold text-emerald-600">
+                        {project.relevanceScore || 88}
+                      </span>
+                      <span className="text-xs text-gray-400 font-semibold">/100</span>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="p-3.5 rounded-xl bg-[#1b1e2c] border border-white/5 space-y-1">
-                  <span className="text-[11px] text-gray-400 flex items-center gap-1">
-                    <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
-                    Lead Score
-                  </span>
-                  <p className="font-bold text-amber-400 text-sm">{project.relevanceScore || 85}/100</p>
-                  <p className="text-[10px] text-gray-400">Verified Demand</p>
+                <div className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-50 border border-orange-200 text-orange-600 text-xs font-bold shrink-0">
+                  <Flame className="w-3.5 h-3.5 text-orange-500" />
+                  <span>High Potential</span>
                 </div>
               </div>
 
-              <div className="p-3.5 rounded-xl bg-[#1b1e2c] border border-white/5 space-y-1">
-                <span className="text-[11px] text-gray-400 flex items-center gap-1">
-                  <MapPin className="w-3.5 h-3.5 text-blue-400" />
-                  Target Location
+              <p className="text-xs text-gray-500 leading-relaxed pt-1 border-t border-gray-100">
+                Well-defined requirement with active client intent and actionable reachability.
+              </p>
+            </div>
+
+            {/* 2. Commercials & Metadata Grid (2x2) */}
+            <div className="p-4 rounded-2xl bg-white border border-gray-200/80 shadow-sm grid grid-cols-2 gap-4">
+              
+              {/* Budget */}
+              <div className="space-y-1">
+                <span className="text-xs text-gray-400 flex items-center gap-1.5 font-medium">
+                  <div className="w-5 h-5 rounded-full bg-purple-100 text-purple-600 flex items-center justify-center text-xs">
+                    $
+                  </div>
+                  Budget
                 </span>
-                <p className="font-semibold text-white text-xs">{project.clientLocation || 'Remote / Global'}</p>
+                <p className="font-bold text-gray-900 text-sm">{project.budget || 'Negotiable'}</p>
+                <p className="text-[11px] text-gray-400">{project.projectType || 'Contract'}</p>
               </div>
+
+              {/* Location */}
+              <div className="space-y-1">
+                <span className="text-xs text-gray-400 flex items-center gap-1.5 font-medium">
+                  <div className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-xs">
+                    <MapPin className="w-3 h-3" />
+                  </div>
+                  Location
+                </span>
+                <p className="font-bold text-gray-900 text-sm">{project.clientLocation || 'Remote'}</p>
+                <p className="text-[11px] text-gray-400">Global / Worldwide</p>
+              </div>
+
+              {/* Timeline */}
+              <div className="space-y-1 pt-2 border-t border-gray-100">
+                <span className="text-xs text-gray-400 flex items-center gap-1.5 font-medium">
+                  <div className="w-5 h-5 rounded-full bg-cyan-100 text-cyan-600 flex items-center justify-center text-xs">
+                    <Calendar className="w-3 h-3" />
+                  </div>
+                  Timeline
+                </span>
+                <p className="font-bold text-gray-900 text-sm">Not specified</p>
+                <p className="text-[11px] text-gray-400">Flexible</p>
+              </div>
+
+              {/* Project Type */}
+              <div className="space-y-1 pt-2 border-t border-gray-100">
+                <span className="text-xs text-gray-400 flex items-center gap-1.5 font-medium">
+                  <div className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-xs">
+                    <FileText className="w-3 h-3" />
+                  </div>
+                  Project Type
+                </span>
+                <p className="font-bold text-gray-900 text-sm truncate">{project.category || 'Feature Development'}</p>
+                <p className="text-[11px] text-gray-400 capitalize">{project.source || 'Direct'}</p>
+              </div>
+
             </div>
 
-            {/* Direct Outreach Hub */}
-            <div className="p-5 rounded-2xl bg-[#1a1d2d] border border-orange-500/20 space-y-4 shadow-lg">
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-1">
-                    <Building className="w-3.5 h-3.5 text-orange-400" />
-                    Client Identity
-                  </span>
-                  <p className="text-sm font-bold text-white">
-                    {project.clientCompany || project.clientName || 'Direct Client'}
-                  </p>
+            {/* 3. Author / Client Card */}
+            <div className="p-5 rounded-2xl bg-white border border-gray-200/80 shadow-sm space-y-4">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-gray-500 uppercase tracking-wider">
+                <UserPlus className="w-3.5 h-3.5 text-blue-600" />
+                <span>Author / Client</span>
+              </div>
+
+              {/* Client Info Row */}
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-12 h-12 rounded-full bg-purple-100 text-purple-700 font-extrabold text-xl flex items-center justify-center shrink-0">
+                    {clientInitial}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <p className="font-bold text-gray-900 text-sm truncate">{clientDisplayName}</p>
+                      <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-blue-50 text-blue-600 border border-blue-200">
+                        Author
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500 capitalize">{project.source} User</p>
+                    <a 
+                      href={project.clientProfileUrl || project.sourceUrl} 
+                      target="_blank" 
+                      rel="noreferrer"
+                      className="text-xs text-blue-600 hover:underline flex items-center gap-1 font-medium mt-0.5"
+                    >
+                      View Profile ↗
+                    </a>
+                  </div>
                 </div>
-                {project.clientCompanyUrl && (
-                  <a
-                    href={project.clientCompanyUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs text-cyan-400 hover:underline flex items-center gap-1 bg-cyan-500/10 px-2 py-1 rounded-lg border border-cyan-500/20"
-                  >
-                    <ExternalLink className="w-3 h-3" />
-                    Website
-                  </a>
-                )}
+
+                <button 
+                  onClick={() => setIsFollowing(!isFollowing)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition shrink-0 ${
+                    isFollowing 
+                      ? 'bg-blue-50 text-blue-700 border-blue-300' 
+                      : 'bg-white hover:bg-gray-50 text-gray-700 border-gray-300'
+                  }`}
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>{isFollowing ? 'Following' : '+ Follow'}</span>
+                </button>
               </div>
 
-              {/* Action Buttons based on contact type */}
-              <div className="space-y-2.5 pt-1">
-                {project.clientEmail && (
-                  <a
-                    href={`mailto:${project.clientEmail}?subject=Regarding%20your%20requirement%20for%20${encodeURIComponent(project.title)}&body=Hi%20${encodeURIComponent(project.clientName || 'there')},%0D%0A%0D%0AI%20saw%20your%20project%20post%20for%20"${encodeURIComponent(project.title)}"....`}
-                    className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 text-white font-semibold text-xs shadow-lg shadow-orange-500/25 hover:opacity-95 transition"
-                  >
-                    <Mail className="w-4 h-4" />
-                    Send Direct Email
-                  </a>
-                )}
+              {/* Primary Call to Action Button */}
+              <div className="flex items-center gap-2 pt-2">
+                <a
+                  href={contactUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex-1 bg-[#4f46e5] hover:bg-[#4338ca] text-white font-semibold py-3.5 px-4 rounded-2xl flex items-center justify-center gap-2.5 shadow-lg shadow-indigo-500/25 transition cursor-pointer"
+                >
+                  <Send className="w-4 h-4 text-white" />
+                  <div className="text-left leading-tight">
+                    <span className="text-xs sm:text-sm font-bold block">{contactLabel}</span>
+                    <span className="text-[10px] opacity-80 block truncate max-w-[180px]">{contactSubtext}</span>
+                  </div>
+                </a>
 
-                {project.clientEmail && (
-                  <button 
-                    onClick={() => handleCopyEmail(project.clientEmail)}
-                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-xs text-gray-300 border border-white/5 transition"
-                  >
-                    {copiedEmail ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-gray-400" />}
-                    {copiedEmail ? 'Copied to Clipboard!' : `Copy ${project.clientEmail}`}
-                  </button>
-                )}
-
-                {project.contactType === 'public_profile_message' && (
-                  <a
-                    href={project.sourceUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-[#ff4500] hover:bg-[#e03d00] text-white font-semibold text-xs shadow-lg shadow-[#ff4500]/25 transition"
-                  >
-                    <MessageSquare className="w-4 h-4" />
-                    Send Direct DM to {project.clientName || 'Client'}
-                  </a>
-                )}
-
-                {project.sourceUrl && (
-                  <a
-                    href={project.sourceUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-xs text-gray-300 border border-white/10 transition"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5 text-cyan-400" />
-                    Open Live Original Post
-                  </a>
-                )}
+                {/* Bookmark button */}
+                <button
+                  onClick={handleSaveClick}
+                  disabled={saving}
+                  className={`p-3.5 rounded-2xl border transition cursor-pointer ${
+                    isSaved 
+                      ? 'bg-emerald-50 text-emerald-600 border-emerald-300' 
+                      : 'bg-white hover:bg-gray-50 text-gray-600 border-gray-200'
+                  }`}
+                  title={isSaved ? 'Saved in Pipeline' : 'Save to Pipeline'}
+                >
+                  <Bookmark className={`w-5 h-5 ${isSaved ? 'fill-emerald-500 text-emerald-500' : ''}`} />
+                </button>
               </div>
+
+              {/* Pro Tip */}
+              <p className="text-[11px] text-gray-500 leading-relaxed flex items-start gap-1.5 pt-1">
+                <span className="text-amber-500 font-bold">⚡ Pro Tip:</span>
+                <span>Mention relevant tech experience and project scope when reaching out for a higher response rate.</span>
+              </p>
+
             </div>
 
           </div>
 
-        </div>
-
-        {/* Footer */}
-        <div className="p-4 px-6 sm:px-8 border-t border-[#26293b] bg-[#12141e] flex items-center justify-between">
-          <button
-            onClick={handleSaveClick}
-            disabled={saving}
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
-              isSaved 
-                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                : 'bg-white/5 text-gray-300 hover:bg-white/10 border border-white/10'
-            }`}
-          >
-            <Bookmark className={`w-4 h-4 ${isSaved ? 'fill-emerald-400 text-emerald-400' : ''}`} />
-            {isSaved ? 'Saved in Pipeline' : 'Save to Pipeline'}
-          </button>
-
-          <button
-            onClick={onClose}
-            className="px-5 py-2 rounded-xl text-xs font-semibold text-gray-400 hover:text-white hover:bg-white/5 transition"
-          >
-            Close
-          </button>
         </div>
 
       </div>
