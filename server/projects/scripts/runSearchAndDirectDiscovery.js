@@ -52,7 +52,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
   const contentExtractor = new ContentExtractor();
   const canonicalDeduplicator = new CanonicalDeduplicator();
   const classifier = new ProjectClassifier();
-  classifier.apiKey = null; // Deterministic strict 9-gate qualification
+  // Gemini 3.6 Flash enabled for high-precision LLM qualification with heuristic fallback
 
   const rawCandidatePool = [];
   const queryStatsMap = new Map();

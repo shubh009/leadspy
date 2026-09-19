@@ -8,6 +8,8 @@ dotenv.config();
  */
 export class ProjectClassifier {
   constructor() {
+    this.geminiApiKey = process.env.GEMINI_API_KEY;
+    this.geminiModel = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
     this.apiKey = process.env.OPENROUTER_API_KEY;
     this.model = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
     this.seenSignatures = new Set();
@@ -62,8 +64,8 @@ export class ProjectClassifier {
 
     let result = null;
 
-    // 1. Try LLM Qualification if API Key exists
-    if (this.apiKey) {
+    // 1. Try LLM Qualification if API Key exists (Gemini primary, OpenRouter secondary)
+    if (this.geminiApiKey || this.apiKey) {
       try {
         const llmResult = await this.callLLM(candidate);
         if (llmResult && typeof llmResult.qualification_status === 'string') {
@@ -179,32 +181,67 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
 }
 `;
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://leadspy.app',
-        'X-Title': 'LeadSpy IT Project Engine'
-      },
-      body: JSON.stringify({
-        model: this.model,
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.1,
-        max_tokens: 700
-      }),
-      signal: AbortSignal.timeout(10000)
-    });
+    // 1. Try Gemini 3.6 Flash if Gemini API Key is present
+    if (this.geminiApiKey) {
+      try {
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${this.geminiModel}:generateContent?key=${this.geminiApiKey}`;
+        const res = await fetch(geminiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 1000,
+              responseMimeType: 'application/json'
+            }
+          }),
+          signal: AbortSignal.timeout(12000)
+        });
 
-    if (!response.ok) {
-      throw new Error(`LLM API returned status ${response.status}`);
+        if (res.ok) {
+          const gData = await res.json();
+          let rawText = gData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          rawText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+          if (rawText) {
+            return JSON.parse(rawText);
+          }
+        } else {
+          console.warn(`[ProjectClassifier] Gemini returned HTTP ${res.status}, trying OpenRouter fallback`);
+        }
+      } catch (geminiErr) {
+        console.warn('[ProjectClassifier] Gemini error:', geminiErr.message);
+      }
     }
 
-    const data = await response.json();
-    let text = data?.choices?.[0]?.message?.content || '';
-    text = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+    // 2. OpenRouter Fallback
+    if (this.apiKey) {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://leadspy.app',
+          'X-Title': 'LeadSpy IT Project Engine'
+        },
+        body: JSON.stringify({
+          model: this.model,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.1,
+          max_tokens: 700
+        }),
+        signal: AbortSignal.timeout(10000)
+      });
 
-    return JSON.parse(text);
+      if (response.ok) {
+        const data = await response.json();
+        let text = data?.choices?.[0]?.message?.content || '';
+        text = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+        return JSON.parse(text);
+      }
+    }
+
+    throw new Error('All LLM endpoints failed');
   }
 
   /**
@@ -269,15 +306,19 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     // ----------------------------------------------------
-    // GATE 3: Hard Reject - General Discussion / Learning / Comment Quotes / Technical Q&A
+    // GATE 3: Hard Reject - General Discussion / Learning / Comment Quotes / Technical Q&A / Repo Bug Issues
     // ----------------------------------------------------
     const isQuoting = /^\s*(&gt;|>)/.test(content) || /^\s*(&gt;|>)/.test(title);
     const isForumQa = /\bhow (do|can|to) (i|we|you) (add|configure|setup|use|fix|implement|connect|access|install|solve)\b/i.test(fullText) ||
                       /devforum\.zoom\.us|stackoverflow\.com/i.test(candidate.sourceUrl || '');
-    const isConsumerTool = /\b(calculator|converter|calculatorsoup|online tool|math calculator)\b/i.test(fullText);
-    const discussionRegex = /\b(how (do|can) i learn|which (library|framework|stack|technology)|best (stack|framework|library|technology)|how much does a website cost|average (price|cost) for|researching .* costs|tutorial|career advice|programming question|what do you think of|i want to learn|recommend a good (react|developer)|can anyone recommend|i believe this is a .* way of thinking|seems to be a lot of overlap|in my opinion|from my experience|it just occurred to me|i was never able|my specialty was|i spent (years|most of that time)|that being said|to me, it's just|i suppose the one thing|speaking also as someone who|i like and believe in this)\b/i;
+    const isConsumerTool = /\b(calculator|converter|calculatorsoup|online tool|math calculator|autoclicker|auto clicker|game hack|cheat engine)\b/i.test(fullText) ||
+                           /opautoclicker\.com|sourceforge\.net/i.test(candidate.sourceUrl || '');
+    const isRepoBugIssue = /\b(issue #\d+|pull request|pr #\d+|merge branch|git commit|make lint|ci\/cd pipeline failed|unit tests? failing|stack trace|nullpointerexception|undefined is not a function|short links actually redirect)\b/i.test(fullText) ||
+                           (candidate.source === 'github' && /\/issues\/\d+/i.test(candidate.sourceUrl || '') && !/\b(bounty|paid|budget|\$|agency|rfp|hire)\b/i.test(fullText));
+
+    const discussionRegex = /\b(how (do|can) i learn|which (library|framework|stack|technology)|best (stack|framework|library|technology)|how much does a website cost|average (price|cost) for|researching .* costs|tutorial|career advice|programming question|what do you think of|i want to learn|recommend a good (react|developer)|can anyone recommend|i believe this is a .* way of thinking|seems to be a lot of overlap|in my opinion|from my experience|it just occurred to me|i was never able|my specialty was|i spent (years|most of that time)|that being said|to me, it's just|i suppose the one thing|speaking also as someone who|i like and believe in this|people were always able to)\b/i;
     
-    if (isQuoting || isForumQa || isConsumerTool || discussionRegex.test(fullText)) {
+    if (isQuoting || isForumQa || isConsumerTool || isRepoBugIssue || discussionRegex.test(fullText)) {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'GENERAL_DISCUSSION',
@@ -308,11 +349,11 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     // ----------------------------------------------------
-    // GATE 5: Non-IT / Non-Project / Adult / Spam Rejection
+    // GATE 5: Non-IT / Non-Project / Adult / Marketing Gigs Rejection
     // ----------------------------------------------------
     const isPayrollSoftware = /payroll\s*(system|software|module|app|platform)/i.test(fullText);
-    const nonItRegex = /\b(payroll|student assistant|receptionist|accountant|garment|fashion communication|escort|sales executive|telecaller|bpo|data entry|operator)\b/i;
-    if ((!isPayrollSoftware && nonItRegex.test(title)) || (!isPayrollSoftware && nonItRegex.test(content.substring(0, 200)))) {
+    const nonItRegex = /\b(payroll|student assistant|receptionist|accountant|garment|fashion communication|escort|sales executive|telecaller|bpo|data entry|operator|marketer|marketers|marketing|social media marketing|copywriter|content writer|va\b|virtual assistant|video editor|thumbnail|voice actor|graphic designer for social media|posting on (instagram|tiktok|facebook|reddit))\b/i;
+    if ((!isPayrollSoftware && nonItRegex.test(title)) || (!isPayrollSoftware && nonItRegex.test(content.substring(0, 300)))) {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'NOT_IT_PROJECT',
