@@ -356,12 +356,26 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       }
     }
 
-    // 4. Public Profile Message (Only if valid native author username exists on Reddit/HN)
+    // 4. Public Profile Message (Only if valid native author username exists on allowed community platforms)
     let hasPublicProfileRoute = false;
     let authorProfileUrl = candidate.authorProfileUrl || null;
-    if (candidate.source === 'reddit' && candidate.author && candidate.author !== 'Anonymous' && candidate.author !== '[deleted]' && candidate.author !== 'AutoModerator') {
-      hasPublicProfileRoute = true;
-      if (!authorProfileUrl) authorProfileUrl = `https://www.reddit.com/user/${candidate.author}`;
+    const author = candidate.author || '';
+    const isGenericAuthor = !author || ['anonymous', '[deleted]', 'automoderator', 'unknown', 'direct client', 'web client', 'hn client', 'reddit client'].includes(author.toLowerCase());
+
+    if (!isGenericAuthor) {
+      if (candidate.source === 'reddit') {
+        hasPublicProfileRoute = true;
+        if (!authorProfileUrl) authorProfileUrl = `https://www.reddit.com/user/${author}`;
+      } else if (candidate.source === 'github') {
+        hasPublicProfileRoute = true;
+        if (!authorProfileUrl) authorProfileUrl = `https://github.com/${author}`;
+      } else if (candidate.source === 'hackernews') {
+        hasPublicProfileRoute = true;
+        if (!authorProfileUrl) authorProfileUrl = `https://news.ycombinator.com/user?id=${author}`;
+      } else if (candidate.source === 'twitter' || candidate.source === 'x') {
+        hasPublicProfileRoute = true;
+        if (!authorProfileUrl) authorProfileUrl = `https://x.com/${author.replace('@', '')}`;
+      }
     }
 
     let contactType = 'none';
