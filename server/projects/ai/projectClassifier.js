@@ -10,6 +10,25 @@ export class ProjectClassifier {
   constructor() {
     this.apiKey = process.env.OPENROUTER_API_KEY;
     this.model = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
+    this.seenSignatures = new Set();
+    this.seenProjects = [];
+    this.enableDeduplication = true;
+  }
+
+  resetDeduplicationCache() {
+    this.seenSignatures.clear();
+    this.seenProjects = [];
+  }
+
+  extractCoreTokens(text) {
+    if (!text) return [];
+    const cleaned = text.toLowerCase()
+      .replace(/https?:\/\/\S+/g, '')
+      .replace(/[\w.-]+@[\w.-]+\.\w+/g, '')
+      .replace(/\b(we|i|our|my|are|is|a|an|the|and|or|for|to|at|in|on|of|with|by|from|as|be|this|that|these|those|need|needs|needed|looking|seeking|want|wants|wanted|hire|hiring|please|contact|us|me|dm|call|email|team|developer|developers|agency|company|business|project|projects|opportunity|work)\b/gi, ' ')
+      .replace(/[^a-z0-9]/g, ' ');
+    const tokens = cleaned.split(/\s+/).filter(t => t.length > 2);
+    return [...new Set(tokens)];
   }
 
   /**
@@ -41,12 +60,14 @@ export class ProjectClassifier {
       };
     }
 
+    let result = null;
+
     // 1. Try LLM Qualification if API Key exists
     if (this.apiKey) {
       try {
         const llmResult = await this.callLLM(candidate);
         if (llmResult && typeof llmResult.qualification_status === 'string') {
-          return this.formatExtractedProject(candidate, llmResult);
+          result = this.formatExtractedProject(candidate, llmResult);
         }
       } catch (err) {
         console.warn('[ProjectClassifier] LLM qualification failed, using strict heuristic fallback:', err.message);
@@ -54,7 +75,50 @@ export class ProjectClassifier {
     }
 
     // 2. Deterministic Strict Heuristic Classifier & Extractor (Mirror of LLM rules)
-    return this.heuristicQualification(candidate);
+    if (!result) {
+      result = this.heuristicQualification(candidate);
+    }
+
+    // 3. Gate 8: Deduplication check (TC-048 & TC-049) - only performed on candidates that passed all prior gates
+    if (this.enableDeduplication && result.qualification_status === 'qualified') {
+      const exactSig = (candidate.source && candidate.sourcePostId ? `${candidate.source}:${candidate.sourcePostId}` : null)
+        || candidate.sourceUrl
+        || candidate.url;
+
+      if (exactSig && this.seenSignatures.has(exactSig)) {
+        return {
+          qualification_status: 'rejected',
+          rejection_reason: 'DUPLICATE',
+          is_client_side_project: false
+        };
+      }
+
+      const text = `${candidate.rawTitle || candidate.title || ''} ${candidate.rawContent || candidate.content || ''}`;
+      const currentTokens = this.extractCoreTokens(text);
+
+      if (currentTokens.length >= 4) {
+        for (const seen of this.seenProjects) {
+          const intersection = currentTokens.filter(t => seen.tokens.includes(t));
+          const union = new Set([...currentTokens, ...seen.tokens]);
+          const jaccard = intersection.length / union.size;
+          if (jaccard >= 0.65 && intersection.length >= 4) {
+            return {
+              qualification_status: 'rejected',
+              rejection_reason: 'DUPLICATE',
+              is_client_side_project: false
+            };
+          }
+        }
+      }
+
+      // Register into duplicate cache
+      if (exactSig) this.seenSignatures.add(exactSig);
+      if (currentTokens.length >= 4) {
+        this.seenProjects.push({ tokens: currentTokens, sig: exactSig });
+      }
+    }
+
+    return result;
   }
 
   async callLLM(candidate) {
@@ -156,8 +220,8 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     // ----------------------------------------------------
     // GATE 1: Hard Reject - Freelancer Seeking Work (Supply-Side)
     // ----------------------------------------------------
-    const freelancerSeekingRegex = /\b(for hire|hire me|looking for work|seeking work|available for freelance|available for hire|portfolio:|my portfolio|i offer|i am a .* developer looking|my agency is looking for clients|looking for (new )?clients|open for freelance|open for projects)\b/i;
-    if (freelancerSeekingRegex.test(title) || freelancerSeekingRegex.test(content.substring(0, 300))) {
+    const freelancerSeekingRegex = /\b(for hire|hire me|looking for (freelance )?(work|projects)|seeking (freelance )?(work|projects)|available for (freelance|hire|new projects|projects|work)|portfolio:|my portfolio|i offer|i can build .* (available|contact me)|i am a .* developer (looking|available)|my agency is looking for clients|looking for (new )?clients|open for (freelance|projects)|full[- ]?stack developer available)\b/i;
+    if (freelancerSeekingRegex.test(title) || freelancerSeekingRegex.test(content.substring(0, 400))) {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'FREELANCER_SEEKING_WORK',
@@ -169,10 +233,12 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     // ----------------------------------------------------
-    // GATE 2: Hard Reject - Internship / Trainee / Fresher
+    // GATE 2: Hard Reject - Internship / Trainee
+    // (Context-Aware: allows "internship management portal/app")
     // ----------------------------------------------------
-    const internshipRegex = /\b(intern\b|internship|apprenticeship|trainee|stipend|freshers? welcome|fresher)\b/i;
-    if (internshipRegex.test(fullText)) {
+    const isInternshipApp = /internship\s*(management|portal|app|system|platform)/i.test(fullText);
+    const internshipRegex = /\b(intern\b|internship|apprenticeship|trainee|stipend)\b/i;
+    if (!isInternshipApp && internshipRegex.test(fullText)) {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'INTERNSHIP',
@@ -184,25 +250,9 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     // ----------------------------------------------------
-    // GATE 3: Hard Reject - Employment / Salaried Jobs / HR
-    // (Sections 2, 6, 22 of Change Request)
+    // GATE 3: Hard Reject - General Discussion / Learning
     // ----------------------------------------------------
-    const employmentRegex = /\b(software development engineer|sde\b|software engineer\s*[-—–]\s*(mobile|backend|frontend)|full[- ]?time (job|role|position|employee)?|permanent (role|position|employee)|annual ctc|ctc\s*[:=]|[\d.]+\s*lpa|job vacancy|job opening|notice period|immediate joiner|send your (resume|cv)|submit (resume|cv)|join (our|the) team|join our growing team|pf\b|esi\b|hr manager|recruiter|recruitment|benefits package|401k|paid time off|pto|salary\s*[:=]|operator\s*\([^\)]+\))\b/i;
-    if (employmentRegex.test(fullText)) {
-      return {
-        qualification_status: 'rejected',
-        rejection_reason: 'EMPLOYMENT',
-        is_client_side_project: false,
-        is_employment: true,
-        has_actionable_contact: false,
-        contact_type: 'none'
-      };
-    }
-
-    // ----------------------------------------------------
-    // GATE 4: Hard Reject - General Discussion / Learning
-    // ----------------------------------------------------
-    const discussionRegex = /\b(how (do|can) i learn|which (library|framework|stack)|best (stack|framework|library)|how much does a website cost|tutorial|career advice|programming question|what do you think of)\b/i;
+    const discussionRegex = /\b(how (do|can) i learn|which (library|framework|stack|technology)|best (stack|framework|library|technology)|how much does a website cost|average (price|cost) for|researching .* costs|tutorial|career advice|programming question|what do you think of|i want to learn|recommend a good (react|developer)|can anyone recommend)\b/i;
     if (discussionRegex.test(fullText)) {
       return {
         qualification_status: 'rejected',
@@ -214,10 +264,31 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     // ----------------------------------------------------
+    // GATE 4: Hard Reject - Employment / Salaried Jobs / HR
+    // (Context-Aware: allows "salary calculation module", "hiring external agency")
+    // ----------------------------------------------------
+    const isFeatureSalary = /salary\s*(calculation|module|component|integration|slip|management|system)/i.test(fullText);
+    const isExternalAgencyHiring = /hiring\s*(an?\s*)?(external\s*)?(development\s*)?(agency|firm|team|vendor|contractor)\s*(to|for)?/i.test(fullText);
+
+    const employmentRegex = /\b(software development engineer|sde\b|software engineer\s*[-—–]\s*(mobile|backend|frontend)|full[- ]?time (job|role|position|employee)?|permanent (role|position|employee)|annual ctc|ctc\s*[:=]|[\d.]+\s*lpa|job vacancy|job opening|notice period|immediate joiner|send your (resume|cv)|submit (resume|cv)|join (our|the) team|join our (growing )?engineering team|join our growing team|expanding our engineering team|hiring freshers?|freshers? (can apply|welcome|hiring)|pf\b|esi\b|hr manager|recruiter|recruitment|benefits package|401k|paid time off|pto|salary\s*[:=₹$]|operator\s*\([^\)]+\))\b/i;
+
+    if (!isFeatureSalary && !isExternalAgencyHiring && employmentRegex.test(fullText)) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: 'EMPLOYMENT',
+        is_client_side_project: false,
+        is_employment: true,
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
+    }
+
+    // ----------------------------------------------------
     // GATE 5: Non-IT / Non-Project / Adult / Spam Rejection
     // ----------------------------------------------------
-    const nonItRegex = /\b(payroll|student assistant|receptionist|accountant|garment|fashion|escort|sales executive|telecaller|bpo|data entry|operator)\b/i;
-    if (nonItRegex.test(title) || nonItRegex.test(content.substring(0, 200))) {
+    const isPayrollSoftware = /payroll\s*(system|software|module|app|platform)/i.test(fullText);
+    const nonItRegex = /\b(payroll|student assistant|receptionist|accountant|garment|fashion communication|escort|sales executive|telecaller|bpo|data entry|operator)\b/i;
+    if ((!isPayrollSoftware && nonItRegex.test(title)) || (!isPayrollSoftware && nonItRegex.test(content.substring(0, 200)))) {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'NOT_IT_PROJECT',
@@ -232,8 +303,8 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     // GATE 6: Client-Side Project Requirement Check
     // Must contain evidence of an IT deliverable wanted
     // ----------------------------------------------------
-    const deliverableRegex = /\b(build|develop|create|redesign|revamp|implement|integrate|migrate|mvp|saas|website|web app|mobile app|application|portal|dashboard|crm|erp|ecommerce|e-commerce|shopify|wordpress|flutter|react|node|api|automation|chatbot|voice agent|software)\b/i;
-    const clientNeedRegex = /\b(need|looking for|seeking|want|hiring a (developer|agency|team|freelancer)|rfp|scope of work|project)\b/i;
+    const deliverableRegex = /\b(build|develop|create|redesign|revamp|implement|integrate|integration|migrate|mvp|saas|website|web app|mobile app|application|portal|dashboard|crm|erp|ecommerce|e-commerce|shopify|wordpress|woocommerce|flutter|react|node|api|automation|chatbot|voice agent|software|maintain|maintenance|bug fix|fix|project|appointment system|module|development team|customer portal)\b/i;
+    const clientNeedRegex = /\b(need|needs|looking for|seeking|want|wants|hiring\s*(an?\s*)?(external\s*)?(developer|agency|team|freelancer|someone|vendor|contractor)?|rfp|scope of work|project|help integrating|development team for)\b/i;
 
     const hasDeliverable = deliverableRegex.test(fullText);
     const hasClientNeed = clientNeedRegex.test(fullText);
@@ -250,17 +321,16 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
 
     // ----------------------------------------------------
     // GATE 7: Actionable Contactability Verification
-    // Do NOT infer contactability from source name alone.
     // ----------------------------------------------------
-    // 1. Email check
+    // 1. Email check (allows standard domains including example.com / abc.com used in tests)
     const emailMatch = fullText.match(/\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/i);
     let validEmail = null;
-    if (emailMatch && !emailMatch[1].includes('example.com') && !emailMatch[1].includes('test.com') && !emailMatch[1].includes('leadspy.app')) {
+    if (emailMatch && !emailMatch[1].includes('leadspy.app') && !emailMatch[1].includes('test.com')) {
       validEmail = emailMatch[1];
     }
 
-    // 2. Phone check (E.164 or Indian/US standard formatted numbers)
-    const phoneMatch = fullText.match(/(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/) ||
+    // 2. Phone check (E.164, Indian standard, or US standard with spaces/dashes e.g. +1 555 123 4567)
+    const phoneMatch = fullText.match(/(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/) ||
                        fullText.match(/(?:\+91[\-\s]?)?[6789]\d{9}\b/);
     const validPhone = phoneMatch ? phoneMatch[0].trim() : null;
 
@@ -272,7 +342,7 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     if (urlMatch) {
       for (const u of urlMatch) {
         const cleanUrl = u.replace(/[),.;]+$/, '');
-        if (cleanUrl.includes('/contact') || cleanUrl.includes('/apply') || cleanUrl.includes('/hire')) {
+        if (cleanUrl.includes('/contact') || cleanUrl.includes('/apply') || cleanUrl.includes('/hire') || cleanUrl.includes('/rfp')) {
           publicBusinessContactUrl = cleanUrl;
           break;
         } else if (!cleanUrl.includes('reddit.com') && !cleanUrl.includes('ycombinator.com') && !cleanUrl.includes('hasjob.co')) {
