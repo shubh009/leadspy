@@ -54,43 +54,6 @@ export class IndiaProjectsAdapter extends BaseAdapter {
       console.warn('[IndiaProjectsAdapter] Hasjob fetch error:', err.message);
     }
 
-    // 2. Add high-intent Indian agency & freelance project requirements
-    const curatedIndiaProjects = this.getCuratedIndiaProjects();
-    return [...candidates, ...curatedIndiaProjects];
-  }
-
-  getCuratedIndiaProjects() {
-    return [
-      {
-        source: 'india_tech',
-        sourcePostId: 'in-proj-101',
-        sourceUrl: 'https://hasjob.co/delhi-logistics/mvp-portal',
-        rawTitle: 'Need React & Node.js Agency / Dev for B2B Logistics Dispatch Portal',
-        rawContent: 'Delhi NCR Logistics Startup | We need an experienced web development agency or freelance developer team to build our dispatch and fleet tracking dashboard. Tech Stack: React, Node.js, Express, PostgreSQL, Google Maps API integration. Budget: ₹1,50,000 - ₹2,50,000 fixed milestone. Timeline: 4-6 weeks. Location: Delhi NCR / Remote India. Contact: tech@delhilogistics.in',
-        author: 'Delhi Logistics Tech',
-        authorProfileUrl: 'https://hasjob.co',
-        postedAt: new Date(Date.now() - 35 * 60 * 1000).toISOString()
-      },
-      {
-        source: 'india_tech',
-        sourcePostId: 'in-proj-102',
-        sourceUrl: 'https://hasjob.co/healthplus-bangalore/mobile-app',
-        rawTitle: 'Looking for Flutter Developer / Agency for Doctor Consultation App',
-        rawContent: 'HealthPlus Clinics (Bangalore) | Looking for a mobile app development agency or senior Flutter developer to develop our Android & iOS consultation and appointment booking app with Razorpay payment gateway and video call integration. Budget: ₹2,00,000 - ₹3,50,000. Location: Bangalore / Remote India. Send proposals to: founders@healthpluscare.in',
-        author: 'HealthPlus Tech',
-        authorProfileUrl: 'https://hasjob.co',
-        postedAt: new Date(Date.now() - 85 * 60 * 1000).toISOString()
-      },
-      {
-        source: 'india_tech',
-        sourcePostId: 'in-proj-103',
-        sourceUrl: 'https://hasjob.co/mumbai-retail/ecommerce-redesign',
-        rawTitle: 'Shopify / Next.js E-Commerce Redesign & Custom Cart Integration',
-        rawContent: 'Fashion Brand based in Mumbai | Seeking Shopify / Next.js frontend expert to revamp our high-traffic e-commerce store with custom product customizer and speed optimization. Budget: ₹75,000 - ₹1,20,000 fixed project. Location: Mumbai / Remote India. Contact: partners@urbanstylemumbai.com',
-        author: 'UrbanStyle Mumbai',
-        authorProfileUrl: 'https://hasjob.co',
-        postedAt: new Date(Date.now() - 140 * 60 * 1000).toISOString()
-      }
-    ];
+    return candidates;
   }
 }

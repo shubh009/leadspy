@@ -10,7 +10,9 @@ import {
   Code2, 
   X,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  ChevronDown,
+  Globe
 } from 'lucide-react';
 import ProjectCard from './ProjectCard';
 import ProjectDetailModal from './ProjectDetailModal';
@@ -312,65 +314,100 @@ export default function ProjectsView() {
               ))}
             </div>
 
-            {/* Filter Bar & Chips */}
-            <div className="space-y-2 pt-2 border-t border-white/5">
-              
-              {/* Row 1: Region / Location Selector & Freshness */}
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="text-[11px] text-gray-400 font-medium mr-1">Region:</span>
-                  {LOCATION_OPTIONS.map((loc) => (
-                    <button
-                      key={loc.id}
-                      onClick={() => setActiveLocation(loc.id)}
-                      className={`px-3 py-1 rounded-xl text-xs font-medium transition cursor-pointer ${
-                        activeLocation === loc.id
-                          ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
-                          : 'bg-[#181a25] text-gray-400 hover:text-gray-200 border border-white/5'
-                      }`}
-                    >
-                      {loc.label}
-                    </button>
-                  ))}
-                </div>
+            {/* Filter Dropdowns Bar */}
+            <div className="flex items-center justify-between gap-3 flex-wrap pt-2 border-t border-white/5">
+              <div className="flex items-center gap-2.5 flex-wrap">
+                <span className="text-[11px] text-gray-400 font-medium flex items-center gap-1">
+                  <Filter className="w-3.5 h-3.5 text-gray-400" />
+                  Filters:
+                </span>
 
-                {/* Freshness Filter */}
-                <div className="flex items-center gap-1 text-xs">
-                  <Clock className="w-3.5 h-3.5 text-gray-400" />
-                  {FRESHNESS_OPTIONS.map((opt) => (
-                    <button
-                      key={opt.id}
-                      onClick={() => setActiveFreshness(opt.id)}
-                      className={`px-2.5 py-1 rounded-lg transition ${
-                        activeFreshness === opt.id
-                          ? 'bg-white/10 text-white font-semibold'
-                          : 'text-gray-400 hover:text-gray-300'
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Row 2: Category Pills */}
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <span className="text-[11px] text-gray-400 font-medium mr-1">Category:</span>
-                {CATEGORIES.map((cat) => (
-                  <button
-                    key={cat.id}
-                    onClick={() => setActiveCategory(cat.id)}
-                    className={`px-3 py-1 rounded-xl text-xs font-medium transition ${
-                      activeCategory === cat.id
-                        ? 'bg-orange-500/20 text-orange-400 border border-orange-500/30'
-                        : 'bg-[#181a25] text-gray-400 hover:text-gray-200 border border-white/5'
-                    }`}
+                {/* Category Dropdown */}
+                <div className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-xl border transition ${
+                  activeCategory !== 'all'
+                    ? 'bg-orange-500/10 border-orange-500/40 text-orange-300'
+                    : 'bg-[#161823] border-[#262838] hover:border-gray-600 text-gray-300'
+                }`}>
+                  <Layers className={`w-3.5 h-3.5 shrink-0 ${activeCategory !== 'all' ? 'text-orange-400' : 'text-gray-400'}`} />
+                  <span className="text-[11px] text-gray-400 font-medium">Category:</span>
+                  <select
+                    value={activeCategory}
+                    onChange={(e) => setActiveCategory(e.target.value)}
+                    className="bg-transparent text-xs font-medium text-white outline-none cursor-pointer pr-5 appearance-none"
                   >
-                    {cat.label}
+                    {CATEGORIES.map((cat) => (
+                      <option key={cat.id} value={cat.id} className="bg-[#161823] text-gray-200">
+                        {cat.label}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="w-3 h-3 text-gray-400 absolute right-2.5 pointer-events-none" />
+                </div>
+
+                {/* Region Dropdown */}
+                <div className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-xl border transition ${
+                  activeLocation !== ''
+                    ? 'bg-blue-500/10 border-blue-500/40 text-blue-300'
+                    : 'bg-[#161823] border-[#262838] hover:border-gray-600 text-gray-300'
+                }`}>
+                  <Globe className={`w-3.5 h-3.5 shrink-0 ${activeLocation !== '' ? 'text-blue-400' : 'text-gray-400'}`} />
+                  <span className="text-[11px] text-gray-400 font-medium">Region:</span>
+                  <select
+                    value={activeLocation}
+                    onChange={(e) => setActiveLocation(e.target.value)}
+                    className="bg-transparent text-xs font-medium text-white outline-none cursor-pointer pr-5 appearance-none"
+                  >
+                    {LOCATION_OPTIONS.map((loc) => (
+                      <option key={loc.id} value={loc.id} className="bg-[#161823] text-gray-200">
+                        {loc.label}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="w-3 h-3 text-gray-400 absolute right-2.5 pointer-events-none" />
+                </div>
+
+                {/* Freshness / Time Dropdown */}
+                <div className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-xl border transition ${
+                  activeFreshness !== ''
+                    ? 'bg-purple-500/10 border-purple-500/40 text-purple-300'
+                    : 'bg-[#161823] border-[#262838] hover:border-gray-600 text-gray-300'
+                }`}>
+                  <Clock className={`w-3.5 h-3.5 shrink-0 ${activeFreshness !== '' ? 'text-purple-400' : 'text-gray-400'}`} />
+                  <span className="text-[11px] text-gray-400 font-medium">Time:</span>
+                  <select
+                    value={activeFreshness}
+                    onChange={(e) => setActiveFreshness(e.target.value)}
+                    className="bg-transparent text-xs font-medium text-white outline-none cursor-pointer pr-5 appearance-none"
+                  >
+                    {FRESHNESS_OPTIONS.map((opt) => (
+                      <option key={opt.id} value={opt.id} className="bg-[#161823] text-gray-200">
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="w-3 h-3 text-gray-400 absolute right-2.5 pointer-events-none" />
+                </div>
+
+                {/* Reset Filters button if any filter is active */}
+                {(activeCategory !== 'all' || activeLocation !== '' || activeFreshness !== '') && (
+                  <button
+                    onClick={() => {
+                      setActiveCategory('all');
+                      setActiveLocation('');
+                      setActiveFreshness('');
+                    }}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-medium text-gray-400 hover:text-rose-400 hover:bg-rose-500/10 border border-white/5 transition cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                    Reset
                   </button>
-                ))}
+                )}
               </div>
 
+              {/* Project Count Pill */}
+              <div className="text-[11px] text-gray-500">
+                Found <span className="font-semibold text-gray-300">{totalCount}</span> projects
+              </div>
             </div>
 
             {/* Active AI Applied Chips */}
