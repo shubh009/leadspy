@@ -6,7 +6,7 @@ import { BaseAdapter } from './baseAdapter.js';
  */
 export class RemoteOkAdapter extends BaseAdapter {
   constructor() {
-    super('remoteok');
+    super('remoteok', 'P2');
   }
 
   async fetchCandidates(options = {}) {

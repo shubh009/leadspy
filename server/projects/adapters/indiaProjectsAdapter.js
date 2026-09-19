@@ -7,7 +7,7 @@ import { BaseAdapter } from './baseAdapter.js';
  */
 export class IndiaProjectsAdapter extends BaseAdapter {
   constructor() {
-    super('india_tech');
+    super('india_tech', 'P3');
   }
 
   async fetchCandidates(options = {}) {

@@ -6,7 +6,7 @@ import { BaseAdapter } from './baseAdapter.js';
  */
 export class GoogleDorkAdapter extends BaseAdapter {
   constructor() {
-    super('linkedin');
+    super('google_discovery', 'P1');
   }
 
   async fetchCandidates(options = {}) {

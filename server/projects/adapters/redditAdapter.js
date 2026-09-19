@@ -6,7 +6,7 @@ import { BaseAdapter } from './baseAdapter.js';
  */
 export class RedditAdapter extends BaseAdapter {
   constructor() {
-    super('reddit');
+    super('reddit', 'P1');
     this.targetSubreddits = ['forhire', 'freelance_forhire', 'jobbit', 'webdev'];
   }
 

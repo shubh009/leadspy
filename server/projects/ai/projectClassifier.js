@@ -469,6 +469,7 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       is_internship: false,
       is_freelancer_seeking_work: false,
       source: candidate.source,
+      priorityTier: candidate.priorityTier || 'P1',
       sourceUrl: candidate.sourceUrl,
       sourcePostId: candidate.sourcePostId || null,
       title: title,

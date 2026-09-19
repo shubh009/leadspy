@@ -6,7 +6,7 @@ import { BaseAdapter } from './baseAdapter.js';
  */
 export class HackerNewsAdapter extends BaseAdapter {
   constructor() {
-    super('hackernews');
+    super('hackernews', 'P2');
     this.hnApiBase = 'https://hacker-news.firebaseio.com/v0';
   }
 

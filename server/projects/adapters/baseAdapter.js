@@ -2,8 +2,9 @@
  * Base Adapter Interface for Project Discovery Sources
  */
 export class BaseAdapter {
-  constructor(name) {
+  constructor(name, tier = 'P1') {
     this.name = name;
+    this.tier = tier;
   }
 
   /**
@@ -21,6 +22,7 @@ export class BaseAdapter {
   normalizeCandidate(raw) {
     return {
       source: this.name,
+      priorityTier: this.tier,
       sourcePostId: raw.id || '',
       sourceUrl: raw.url || '',
       rawTitle: raw.title || '',
