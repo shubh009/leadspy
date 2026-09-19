@@ -145,8 +145,23 @@ export default function ProjectDetailModal({ project, onClose, onSave, isSaved =
           <div className="p-4 rounded-xl bg-[#1e212f] border border-white/10 space-y-3">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs text-gray-400">Posted by</p>
-                <p className="text-sm font-semibold text-white">{project.clientName}</p>
+                <p className="text-xs text-gray-400">
+                  {project.clientCompany ? 'Organization / Company' : 'Posted by'}
+                </p>
+                <p className="text-sm font-semibold text-white flex items-center gap-1.5">
+                  {project.clientCompany || project.clientName || 'Direct Client'}
+                  {project.clientCompanyUrl && (
+                    <a
+                      href={project.clientCompanyUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs text-cyan-400 hover:underline flex items-center gap-1"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      Website
+                    </a>
+                  )}
+                </p>
               </div>
               {project.clientEmail && (
                 <button 
@@ -158,6 +173,13 @@ export default function ProjectDetailModal({ project, onClose, onSave, isSaved =
                 </button>
               )}
             </div>
+
+            {/* Section 11 Safe Company Opportunity Notice */}
+            {project.clientCompany && (
+              <div className="p-2.5 rounded-lg bg-cyan-500/10 border border-cyan-500/20 text-[11px] text-cyan-300 leading-snug">
+                ℹ️ Public project requirement associated with this company was detected.
+              </div>
+            )}
 
             {/* Direct Action Buttons */}
             <div className="grid grid-cols-2 gap-2 pt-1">
