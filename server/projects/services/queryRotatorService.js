@@ -9,6 +9,8 @@
 import { 
   projectQueryLibrary, 
   QUERY_PRIORITY, 
+  DISCOVERY_MODE,
+  highIntentProjectQueries,
   composeDynamicQueries, 
   applySiteFilter,
   TARGET_PLATFORM_DOMAINS 
@@ -43,27 +45,33 @@ export class QueryRotatorService {
     const options = { ...this.config, ...customOptions };
     const batchSize = options.batchSize || 20;
     const cycleNum = options.cycle || 1;
-
-    // Determine target categories
-    let targetCategories = options.categories;
-    if (!targetCategories || targetCategories.length === 0) {
-      const cycleKey = ((cycleNum - 1) % 3) + 1;
-      targetCategories = ROTATION_CYCLES[cycleKey] || ROTATION_CYCLES[1];
-    }
+    const mode = options.mode || DISCOVERY_MODE.STANDARD;
 
     const candidateQueries = [];
 
-    // Collect queries from selected categories
-    for (const cat of targetCategories) {
-      if (cat === 'industry') {
-        const industryObj = projectQueryLibrary.industry || {};
-        for (const subInd of Object.keys(industryObj)) {
-          const list = industryObj[subInd] || [];
-          list.forEach(q => candidateQueries.push({ ...q, category: `industry_${subInd}` }));
+    // Mode: HIGH_INTENT (Task 9)
+    if (mode === DISCOVERY_MODE.HIGH_INTENT) {
+      highIntentProjectQueries.forEach(q => candidateQueries.push({ ...q, category: 'high_intent' }));
+    } else {
+      // Standard Categorized Mode: Determine target categories
+      let targetCategories = options.categories;
+      if (!targetCategories || targetCategories.length === 0) {
+        const cycleKey = ((cycleNum - 1) % 3) + 1;
+        targetCategories = ROTATION_CYCLES[cycleKey] || ROTATION_CYCLES[1];
+      }
+
+      // Collect queries from selected categories
+      for (const cat of targetCategories) {
+        if (cat === 'industry') {
+          const industryObj = projectQueryLibrary.industry || {};
+          for (const subInd of Object.keys(industryObj)) {
+            const list = industryObj[subInd] || [];
+            list.forEach(q => candidateQueries.push({ ...q, category: `industry_${subInd}` }));
+          }
+        } else if (projectQueryLibrary[cat]) {
+          const list = projectQueryLibrary[cat];
+          list.forEach(q => candidateQueries.push({ ...q, category: cat }));
         }
-      } else if (projectQueryLibrary[cat]) {
-        const list = projectQueryLibrary[cat];
-        list.forEach(q => candidateQueries.push({ ...q, category: cat }));
       }
     }
 

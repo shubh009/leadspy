@@ -3,24 +3,23 @@
  * File: server/projects/scripts/runSearchAndDirectDiscovery.js
  * 
  * Implements:
- * 1. Layer 1: Query Library & QueryRotatorService (Cycles, Priorities, Batching)
- * 2. Layer 2: Multi-Provider Search (Bing, SearXNG, DuckDuckGo) + Direct Sources (HN 30d, Reddit RSS, GitHub 30d)
- * 3. URL Deduplication
+ * 1. Layer 1: Query Library & QueryRotatorService (Cycles, Priorities, Batching, DISCOVERY_MODE)
+ * 2. Layer 2: Multi-Provider Search + Direct Sources (HN 30d, Reddit, GitHub) with RATE_LIMITED tracking
+ * 3. Canonical Deduplication (Raw URL, Canonical URL, Source-ID, Content Fingerprint)
  * 4. Deep Content Extractor (Full page context, publish date, contacts)
  * 5. Project Classifier AI (Deterministic 9-Gate Qualification)
- * 6. Smart Freshness Tagging (fresh < 30d, recent_discovery, archive > 30d)
- * 7. Query Performance Tracking (Section 12) & Admin Metadata (Section 16)
+ * 6. Gate 8 Semantic Deduplication (Unchanged safety net)
+ * 7. Deduplication Metrics Reporting (Task 7)
  * 8. Database Persistence (Supabase master_projects)
  */
 
 import { QueryRotatorService, ROTATION_CYCLES } from '../services/queryRotatorService.js';
+import { DISCOVERY_MODE } from '../config/projectQueryLibrary.js';
 import { MultiSearchManager } from '../sources/searchProvider.js';
 import { ContentExtractor } from '../services/contentExtractor.js';
 import { ProjectClassifier } from '../ai/projectClassifier.js';
+import { CanonicalDeduplicator } from '../services/canonicalDeduplicator.js';
 import { saveMasterProjects } from '../services/projectDbService.js';
-import { HackerNewsAdapter } from '../adapters/hackerNewsAdapter.js';
-import { GitHubDiscussionsAdapter } from '../adapters/githubDiscussionsAdapter.js';
-import { RedditAdapter } from '../adapters/redditAdapter.js';
 
 export async function runFullDiscoveryPipeline(config = {}) {
   const {
@@ -29,97 +28,122 @@ export async function runFullDiscoveryPipeline(config = {}) {
     cycle = 1,
     categories = null,
     siteFilter = null,
-    location = null
+    location = null,
+    mode = DISCOVERY_MODE.STANDARD,
+    persistToDb = true
   } = config;
 
   console.log('================================================================');
-  console.log('🚀 RUNNING COMPLETE PROJECT DISCOVERY PIPELINE');
+  console.log(`🚀 RUNNING PROJECT DISCOVERY PIPELINE [MODE: ${mode.toUpperCase()}]`);
   console.log(`   Config: Cycle ${cycle} | Batch Size: ${batchSize} | Days: ${days}`);
   if (categories) console.log(`   Selected Categories: ${categories.join(', ')}`);
   if (siteFilter) console.log(`   Site Filter: ${siteFilter}`);
   if (location) console.log(`   Target Location: ${location}`);
   console.log('================================================================\n');
 
-  const rotator = new QueryRotatorService({ days, batchSize, cycle, categories, siteFilter, location });
-  const searchQueries = rotator.getQueriesForCycle();
+  const rotator = new QueryRotatorService({ days, batchSize, cycle, categories, siteFilter, location, mode });
+  const searchQueries = rotator.getQueriesForCycle({ mode, batchSize });
 
-  console.log(`📋 Selected ${searchQueries.length} prioritized queries for Cycle ${cycle}:`);
+  console.log(`📋 Selected ${searchQueries.length} prioritized queries [Mode: ${mode}]:`);
   searchQueries.forEach((q, i) => console.log(`   ${i + 1}. [${q.priority}] ${q.query}`));
   console.log('');
 
   const searchManager = new MultiSearchManager();
   const contentExtractor = new ContentExtractor();
+  const canonicalDeduplicator = new CanonicalDeduplicator();
   const classifier = new ProjectClassifier();
-  classifier.apiKey = null; // Deterministic strict qualification
+  classifier.apiKey = null; // Deterministic strict 9-gate qualification
 
   const rawCandidatePool = [];
-  const seenUrls = new Set();
-
-  // Helper for tracking query performance
   const queryStatsMap = new Map();
+  const providerStatus = {
+    hackernews: 'ACTIVE',
+    reddit: 'ACTIVE',
+    github: 'ACTIVE',
+    search_engines: 'ACTIVE'
+  };
 
-  function trackFound(queryStr, sourceName, url) {
+  function trackFound(queryStr, sourceName) {
     if (!queryStatsMap.has(queryStr)) {
-      queryStatsMap.set(queryStr, { source: sourceName, found: 0, unique: 0, qualified: 0, rejected: 0, contactable: 0 });
+      queryStatsMap.set(queryStr, { source: sourceName, rawResults: 0, uniqueResults: 0, qualified: 0, rejected: 0 });
     }
     const stat = queryStatsMap.get(queryStr);
-    stat.found++;
-    if (!seenUrls.has(url)) {
-      stat.unique++;
+    stat.rawResults++;
+  }
+
+  function ingestCandidate(rawItem) {
+    trackFound(rawItem.search_query, rawItem.source);
+
+    // Pre-Classification Canonical Deduplication (Tasks 2, 3, 4)
+    const check = canonicalDeduplicator.checkUrlCandidate(rawItem);
+    if (!check.isDuplicate) {
+      const stat = queryStatsMap.get(rawItem.search_query);
+      if (stat) stat.uniqueResults++;
+
+      rawCandidatePool.push({
+        ...rawItem,
+        canonicalUrl: check.canonicalUrl || rawItem.url,
+        canonicalId: check.canonicalId || null
+      });
     }
   }
 
   // -------------------------------------------------------------
-  // 1. DIRECT SOURCE: Hacker News (Strictly within last 30-45 days)
+  // 1. DIRECT SOURCE: Hacker News (Strictly within last 30 days)
   // -------------------------------------------------------------
-  console.log('📡 [Direct Source] Fetching Hacker News recent threads (Strict 30-day window)...');
+  console.log('📡 [Direct Source] Fetching Hacker News recent contract threads...');
   try {
     const thirtyDaysAgo = Math.floor(Date.now() / 1000) - (days * 86400);
-    const hq = 'SEEKING FREELANCER';
-    const searchUrl = `https://hn.algolia.com/api/v1/search_by_date?query=${encodeURIComponent(hq)}&tags=comment&numericFilters=created_at_i>${thirtyDaysAgo}&hitsPerPage=20`;
+    const hq = mode === DISCOVERY_MODE.HIGH_INTENT ? 'need someone to build' : 'SEEKING FREELANCER';
+    const searchUrl = `https://hn.algolia.com/api/v1/search_by_date?query=${encodeURIComponent(hq)}&tags=comment&numericFilters=created_at_i>${thirtyDaysAgo}&hitsPerPage=25`;
     const res = await fetch(searchUrl, { signal: AbortSignal.timeout(6000) });
-    if (res.ok) {
+    
+    if (res.status === 429) {
+      providerStatus.hackernews = 'RATE_LIMITED';
+      console.warn('   ⚠️ Hacker News API returned HTTP 429 (RATE_LIMITED)');
+    } else if (res.ok) {
       const data = await res.json();
       for (const h of (data.hits || [])) {
         const itemUrl = `https://news.ycombinator.com/item?id=${h.objectID}`;
-        trackFound(hq, 'hackernews', itemUrl);
-        if (!seenUrls.has(itemUrl)) {
-          seenUrls.add(itemUrl);
-          const text = (h.comment_text || '').replace(/<[^>]*>?/gm, ' ').replace(/&#x27;/g, "'").replace(/&amp;/g, '&').replace(/&quot;/g, '"');
-          const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-          rawCandidatePool.push({
-            source: 'hackernews',
-            url: itemUrl,
-            title: lines[0]?.substring(0, 100) || 'Hacker News Project Opportunity',
-            snippet: text,
-            author: h.author || 'HN Client',
-            postedAt: h.created_at || null,
-            priorityTier: 'P2',
-            search_query: hq,
-            search_source: 'hackernews',
-            search_result_url: itemUrl,
-            discovered_at: new Date().toISOString()
-          });
-        }
+        const text = (h.comment_text || '').replace(/<[^>]*>?/gm, ' ').replace(/&#x27;/g, "'").replace(/&amp;/g, '&').replace(/&quot;/g, '"');
+        const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+        ingestCandidate({
+          source: 'hackernews',
+          url: itemUrl,
+          title: lines[0]?.substring(0, 100) || 'Hacker News Project Opportunity',
+          snippet: text,
+          author: h.author || 'HN Client',
+          postedAt: h.created_at || null,
+          priorityTier: 'P2',
+          search_query: hq,
+          search_source: 'hackernews',
+          search_result_url: itemUrl,
+          discovered_at: new Date().toISOString()
+        });
       }
     }
-    console.log(`   -> Hacker News items collected: ${rawCandidatePool.filter(c => c.source === 'hackernews').length}`);
   } catch (err) {
     console.warn('   [Notice] HN fetch notice:', err.message);
   }
 
   // -------------------------------------------------------------
-  // 2. DIRECT SOURCE: Reddit Live Hiring Feeds (RSS)
+  // 2. DIRECT SOURCE: Reddit Live Hiring Feeds
   // -------------------------------------------------------------
-  console.log('📡 [Direct Source] Fetching live Reddit hiring feeds...');
-  const subreddits = ['forhire', 'freelance_forhire', 'jobbit', 'devsforhire', 'hireaprogrammer'];
+  console.log('📡 [Direct Source] Fetching live Reddit feeds with rate-limit detection...');
+  const subreddits = ['forhire', 'freelance_forhire', 'jobbit'];
   for (const sub of subreddits) {
     try {
       const res = await fetch(`https://www.reddit.com/r/${sub}/new/.rss`, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+        headers: { 'User-Agent': 'LeadSpyBot/1.0 (IT Project Engine; https://leadspy.app)' },
         signal: AbortSignal.timeout(6000)
       });
-      if (res.ok) {
+
+      if (res.status === 429) {
+        providerStatus.reddit = 'RATE_LIMITED';
+        console.warn(`   ⚠️ Reddit r/${sub} returned HTTP 429 (RATE_LIMITED) - respecting backoff`);
+        break;
+      } else if (res.ok) {
         const xml = await res.text();
         const entries = xml.match(/<entry>[\s\S]*?<\/entry>/g) || [];
         for (const e of entries) {
@@ -129,84 +153,80 @@ export async function runFullDiscoveryPipeline(config = {}) {
           const author = (e.match(/<name>([\s\S]*?)<\/name>/) || [])[1] || 'RedditUser';
           const content = (e.match(/<content[^>]*>([\s\S]*?)<\/content>/) || [])[1]?.replace(/<[^>]*>?/gm, ' ') || rawTitle;
 
-          // Only take hiring posts, ignore [for hire]
           if (/\[hiring\]/i.test(rawTitle) || /hiring/i.test(rawTitle)) {
-            trackFound(`r/${sub}/hiring`, 'reddit', link);
-            if (link && !seenUrls.has(link)) {
-              seenUrls.add(link);
-              rawCandidatePool.push({
-                source: 'reddit',
-                url: link,
-                title: rawTitle.replace(/^\[hiring\]\s*/i, ''),
-                snippet: content.substring(0, 700),
-                author,
-                postedAt: updated,
-                priorityTier: 'P1',
-                search_query: `r/${sub}/new.rss`,
-                search_source: 'reddit',
-                search_result_url: link,
-                discovered_at: new Date().toISOString()
-              });
-            }
+            ingestCandidate({
+              source: 'reddit',
+              url: link,
+              title: rawTitle.replace(/^\[hiring\]\s*/i, ''),
+              snippet: content.substring(0, 700),
+              author,
+              postedAt: updated,
+              priorityTier: 'P1',
+              search_query: `r/${sub}/new.rss`,
+              search_source: 'reddit',
+              search_result_url: link,
+              discovered_at: new Date().toISOString()
+            });
           }
         }
       }
     } catch (err) {}
+    // Rate-aware pause
+    await new Promise(r => setTimeout(r, 500));
   }
-  console.log(`   -> Reddit live items collected: ${rawCandidatePool.filter(c => c.source === 'reddit').length}`);
 
   // -------------------------------------------------------------
-  // 3. DIRECT SOURCE: GitHub Public Issues & Discussions (30d)
+  // 3. DIRECT SOURCE: GitHub Public Issues (30d)
   // -------------------------------------------------------------
-  console.log('📡 [Direct Source] Fetching GitHub open client requests (30d)...');
+  console.log('📡 [Direct Source] Fetching GitHub open client requests...');
   try {
-    const ghQuery = '("need developer" OR "looking for developer" OR "build website") is:issue is:open';
+    const ghQuery = mode === DISCOVERY_MODE.HIGH_INTENT 
+      ? '("need someone to build" OR "looking for development agency" OR "need an app built") is:issue is:open'
+      : '("need developer" OR "looking for developer" OR "build website") is:issue is:open';
+
     const ghUrl = `https://api.github.com/search/issues?q=${encodeURIComponent(ghQuery)}&sort=created&order=desc&per_page=15`;
     const ghRes = await fetch(ghUrl, {
       headers: { 'User-Agent': 'LeadSpyBot/1.0', 'Accept': 'application/vnd.github.v3+json' },
-      signal: AbortSignal.timeout(10000)
+      signal: AbortSignal.timeout(8000)
     });
-    if (ghRes.ok) {
+
+    if (ghRes.status === 403 || ghRes.status === 429) {
+      providerStatus.github = 'RATE_LIMITED';
+      console.warn('   ⚠️ GitHub Search API returned HTTP 403/429 (RATE_LIMITED) - respecting rate window');
+    } else if (ghRes.ok) {
       const ghData = await ghRes.json();
       for (const item of (ghData.items || [])) {
-        trackFound(ghQuery, 'github', item.html_url);
-        if (item.html_url && !seenUrls.has(item.html_url)) {
-          seenUrls.add(item.html_url);
-          rawCandidatePool.push({
-            source: 'github',
-            url: item.html_url,
-            title: item.title,
-            snippet: `${item.title} | ${item.body?.substring(0, 600) || item.title}`,
-            author: item.user?.login || 'GitHub User',
-            postedAt: item.created_at || null,
-            priorityTier: 'P1',
-            search_query: ghQuery,
-            search_source: 'github',
-            search_result_url: item.html_url,
-            discovered_at: new Date().toISOString()
-          });
-        }
+        ingestCandidate({
+          source: 'github',
+          url: item.html_url,
+          title: item.title,
+          snippet: `${item.title} | ${item.body?.substring(0, 600) || item.title}`,
+          author: item.user?.login || 'GitHub User',
+          postedAt: item.created_at || null,
+          priorityTier: 'P1',
+          search_query: ghQuery,
+          search_source: 'github',
+          search_result_url: item.html_url,
+          discovered_at: new Date().toISOString()
+        });
       }
     }
-    console.log(`   -> GitHub candidates collected: ${rawCandidatePool.filter(c => c.source === 'github').length}`);
   } catch (err) {
     console.warn('   [Notice] GitHub fetch notice:', err.message);
   }
 
   // -------------------------------------------------------------
-  // 4. SEARCH PROVIDERS: Executing Rotator Cycle Queries
+  // 4. SEARCH PROVIDERS: Executing Rotator Queries with Backoff
   // -------------------------------------------------------------
-  console.log(`📡 [Search Providers] Executing ${searchQueries.length} prioritized queries across search engines...`);
+  console.log(`📡 [Search Providers] Executing ${searchQueries.length} queries across web engines...`);
 
   for (const item of searchQueries) {
     const queryStr = item.query;
     try {
       const { provider, results } = await searchManager.searchWithFallback(queryStr, { timeRange: 'month', limit: 8 });
       for (const r of results) {
-        trackFound(queryStr, provider, r.url);
-        if (contentExtractor.isValidTarget(r.url) && !seenUrls.has(r.url)) {
-          seenUrls.add(r.url);
-          rawCandidatePool.push({
+        if (contentExtractor.isValidTarget(r.url)) {
+          ingestCandidate({
             source: r.engine || provider || 'web_search',
             url: r.url,
             title: r.title,
@@ -223,116 +243,135 @@ export async function runFullDiscoveryPipeline(config = {}) {
     } catch (err) {
       console.warn(`   [Search Engine notice for "${queryStr}"]:`, err.message);
     }
+    // Respect rate limits with queue delay
+    await new Promise(r => setTimeout(r, 400));
   }
 
-  console.log(`\n📥 Total Unique Discovered Candidates: ${rawCandidatePool.length}`);
-  console.log('🔍 Executing Deep Content Extraction on candidates...\n');
-
   // -------------------------------------------------------------
-  // 5. DEEP CONTENT EXTRACTION & CONTEXT ANALYSIS
+  // 5. CONTENT EXTRACTION & FINGERPRINT DEDUPLICATION (Tasks 2 & 5)
   // -------------------------------------------------------------
+  console.log(`\n🔍 Fetching & Extracting deep content for ${rawCandidatePool.length} pre-deduplicated candidates...`);
   const enrichedCandidates = [];
+
   for (const item of rawCandidatePool) {
     try {
       const extracted = await contentExtractor.extractDeepContent(item);
       if (extracted && extracted.rawContent) {
-        // Carry forward admin/debug metadata (Section 16)
-        extracted.search_query = item.search_query || 'unknown';
-        extracted.search_source = item.search_source || item.source;
-        extracted.search_result_url = item.search_result_url || item.url;
-        extracted.discovered_at = item.discovered_at || new Date().toISOString();
-        if (!extracted.postedAt && item.postedAt) extracted.postedAt = item.postedAt;
+        // Step 2 Pre-Filter: Content Fingerprint Deduplication
+        const fpCheck = canonicalDeduplicator.checkContentCandidate(extracted.title || item.title, extracted.rawContent);
+        if (!fpCheck.isDuplicate) {
+          extracted.search_query = item.search_query || 'unknown';
+          extracted.search_source = item.search_source || item.source;
+          extracted.search_result_url = item.search_result_url || item.url;
+          extracted.discovered_at = item.discovered_at || new Date().toISOString();
+          if (!extracted.postedAt && item.postedAt) extracted.postedAt = item.postedAt;
 
-        enrichedCandidates.push(extracted);
+          enrichedCandidates.push(extracted);
+        }
       }
     } catch (err) {}
   }
 
-  console.log(`✨ Successfully extracted deep context for ${enrichedCandidates.length} pages.`);
-  console.log('⚙️ Passing full context through 9-Gate Project Classifier AI...\n');
+  console.log(`✨ Filtered into ${enrichedCandidates.length} clean candidates sent to 9-Gate Classifier.`);
 
   // -------------------------------------------------------------
-  // 6. QUALIFICATION VIA 9-GATE ENGINE
+  // 6. QUALIFICATION VIA 9-GATE ENGINE (Gate 8 Semantic Dedup Preserved)
   // -------------------------------------------------------------
   const qualifiedProjects = [];
-  const stats = { fresh: 0, recent_discovery: 0, archive: 0, rejected: 0 };
+  const rejectionReasons = {};
+  let gate8Duplicates = 0;
 
   for (const candidate of enrichedCandidates) {
     const result = await classifier.qualifyAndExtract(candidate);
     const qStat = queryStatsMap.get(candidate.search_query);
 
     if (result.qualification_status === 'qualified' && result.has_actionable_contact) {
-      const freshness = candidate.freshnessStatus || 'fresh';
-      result.freshnessStatus = freshness;
-      result.status = freshness === 'archive' ? 'archive' : 'active';
+      result.freshnessStatus = candidate.freshnessStatus || 'fresh';
+      result.status = candidate.freshnessStatus === 'archive' ? 'archive' : 'active';
       result.search_query = candidate.search_query;
       result.search_source = candidate.search_source;
 
-      if (freshness === 'fresh') stats.fresh++;
-      else if (freshness === 'archive') stats.archive++;
-      else stats.recent_discovery++;
-
-      if (qStat) {
-        qStat.qualified++;
-        if (result.has_actionable_contact) qStat.contactable++;
-      }
-
+      if (qStat) qStat.qualified++;
       qualifiedProjects.push(result);
-      console.log(`🌟 [QUALIFIED] [${freshness.toUpperCase()}] ${result.title.substring(0, 70)}`);
-      console.log(`   -> Source: ${result.source} | Query: "${candidate.search_query}"`);
+
+      console.log(`🌟 [QUALIFIED] [${result.source.toUpperCase()}] ${result.title.substring(0, 70)}`);
       console.log(`   -> Contact: ${result.contact_type} (${result.contact_value || result.clientEmail})`);
       console.log(`   -> Link: ${result.sourceUrl}\n`);
     } else {
-      stats.rejected++;
+      const reason = result.rejection_reason || 'UNQUALIFIED';
+      rejectionReasons[reason] = (rejectionReasons[reason] || 0) + 1;
+      if (reason === 'DUPLICATE') gate8Duplicates++;
       if (qStat) qStat.rejected++;
     }
   }
 
-  // Record Telemetry in QueryRotatorService (Section 12)
-  for (const [qStr, s] of queryStatsMap.entries()) {
-    QueryRotatorService.recordQueryPerformance({
+  const dedupMetrics = canonicalDeduplicator.getMetrics();
+  const finalUniqueCandidates = enrichedCandidates.length - gate8Duplicates;
+
+  // -------------------------------------------------------------
+  // 7. STRUCTURED DEDUPLICATION & RUN REPORT (Task 7)
+  // -------------------------------------------------------------
+  console.log('================================================================');
+  console.log(`📊 DEDUPLICATION & CLASSIFICATION METRICS [MODE: ${mode.toUpperCase()}]:`);
+  console.log(`   Raw Search Results               : ${dedupMetrics.rawResults}`);
+  console.log(`   Exact URL Duplicates Removed     : ${dedupMetrics.urlDuplicatesRemoved}`);
+  console.log(`   Canonical URL Duplicates Removed : ${dedupMetrics.canonicalUrlDuplicatesRemoved}`);
+  console.log(`   Source-ID Duplicates Removed     : ${dedupMetrics.sourceIdDuplicatesRemoved}`);
+  console.log(`   Content Duplicates Removed       : ${dedupMetrics.contentDuplicatesRemoved}`);
+  console.log(`   Candidates Entering Classifier   : ${enrichedCandidates.length}`);
+  console.log(`   Gate 8 Semantic Duplicates       : ${gate8Duplicates}`);
+  console.log(`   Final Unique Candidates          : ${finalUniqueCandidates}`);
+  console.log(`   Qualified Projects               : ${qualifiedProjects.length}`);
+  console.log(`   Rejection Breakdown              :`, rejectionReasons);
+  console.log(`   Provider Rate-Limit Status       :`, providerStatus);
+  console.log('================================================================\n');
+
+  // Query performance breakdown
+  const queryBreakdown = [];
+  for (const [qStr, stat] of queryStatsMap.entries()) {
+    const qualRate = stat.rawResults > 0 ? (stat.qualified / stat.rawResults).toFixed(3) : 0;
+    queryBreakdown.push({
       query: qStr,
-      source: s.source,
-      resultsFound: s.found,
-      uniqueResults: s.unique,
-      qualifiedProjects: s.qualified,
-      rejectedResults: s.rejected,
-      contactableProjects: s.contactable
+      source: stat.source,
+      rawResults: stat.rawResults,
+      uniqueResults: stat.uniqueResults,
+      qualified: stat.qualified,
+      rejected: stat.rejected,
+      qualificationRate: qualRate
     });
   }
 
-  console.log('================================================================');
-  console.log(`📊 DISCOVERY SUMMARY FOR CYCLE ${cycle}:`);
-  console.log(`   Total URLs Ingested    : ${rawCandidatePool.length}`);
-  console.log(`   Enriched with Context  : ${enrichedCandidates.length}`);
-  console.log(`   Total Qualified Leads  : ${qualifiedProjects.length}`);
-  console.log(`     - Fresh (< 30 days)  : ${stats.fresh}`);
-  console.log(`     - Recent Discovery   : ${stats.recent_discovery}`);
-  console.log(`     - Archive (> 30 days): ${stats.archive}`);
-  console.log(`   Rejected (Noise/Jobs)  : ${stats.rejected}`);
-  console.log('================================================================\n');
-
   // -------------------------------------------------------------
-  // 7. PERSISTENCE TO DATABASE (Supabase master_projects)
+  // 8. DATABASE PERSISTENCE
   // -------------------------------------------------------------
-  if (qualifiedProjects.length > 0) {
+  if (persistToDb && qualifiedProjects.length > 0) {
     console.log(`💾 Persisting ${qualifiedProjects.length} qualified leads into Database...`);
     const dbRes = await saveMasterProjects(qualifiedProjects);
     console.log(`✅ Supabase Database updated! Total active projects: ${dbRes.total || qualifiedProjects.length}`);
   }
 
   return {
+    mode,
     cycle,
-    ingested: rawCandidatePool.length,
-    qualified: qualifiedProjects.length,
-    stats,
-    performanceSummary: QueryRotatorService.getPerformanceSummary()
+    metrics: {
+      rawResults: dedupMetrics.rawResults,
+      urlDuplicatesRemoved: dedupMetrics.urlDuplicatesRemoved,
+      canonicalUrlDuplicatesRemoved: dedupMetrics.canonicalUrlDuplicatesRemoved,
+      sourceIdDuplicatesRemoved: dedupMetrics.sourceIdDuplicatesRemoved,
+      contentDuplicatesRemoved: dedupMetrics.contentDuplicatesRemoved,
+      candidatesEnteringClassifier: enrichedCandidates.length,
+      gate8Duplicates,
+      finalUniqueCandidates,
+      qualifiedProjects: qualifiedProjects.length
+    },
+    rejectionReasons,
+    providerStatus,
+    queryBreakdown
   };
 }
 
-// If run directly via CLI
 if (process.argv[1]?.endsWith('runSearchAndDirectDiscovery.js')) {
-  runFullDiscoveryPipeline({ cycle: 1, batchSize: 20, days: 30 })
+  runFullDiscoveryPipeline({ cycle: 1, batchSize: 15, days: 30 })
     .then(() => process.exit(0))
     .catch(err => {
       console.error('Fatal Discovery Pipeline Error:', err);

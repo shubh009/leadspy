@@ -12,6 +12,35 @@ export const QUERY_PRIORITY = {
   LOW: 'LOW'
 };
 
+export const DISCOVERY_MODE = {
+  STANDARD: 'standard',
+  HIGH_INTENT: 'high_intent'
+};
+
+/**
+ * Task 9: Dedicated High-Intent Project Discovery Queries
+ * Prioritizes direct buyer/client phrases without replacing the complete library.
+ */
+export const highIntentProjectQueries = [
+  { query: 'need someone to build', priority: QUERY_PRIORITY.HIGH },
+  { query: 'looking for development agency', priority: QUERY_PRIORITY.HIGH },
+  { query: 'need a development team', priority: QUERY_PRIORITY.HIGH },
+  { query: 'need custom software', priority: QUERY_PRIORITY.HIGH },
+  { query: 'need website development', priority: QUERY_PRIORITY.HIGH },
+  { query: 'need mobile app development', priority: QUERY_PRIORITY.HIGH },
+  { query: 'need SaaS development', priority: QUERY_PRIORITY.HIGH },
+  { query: 'need MVP development', priority: QUERY_PRIORITY.HIGH },
+  { query: 'need AI development', priority: QUERY_PRIORITY.HIGH },
+  { query: 'need AI agent development', priority: QUERY_PRIORITY.HIGH },
+  { query: 'looking for software development agency', priority: QUERY_PRIORITY.HIGH },
+  { query: 'looking for technology partner', priority: QUERY_PRIORITY.HIGH },
+  { query: 'need someone to develop', priority: QUERY_PRIORITY.HIGH },
+  { query: 'looking for someone to build', priority: QUERY_PRIORITY.HIGH },
+  { query: 'need an app built', priority: QUERY_PRIORITY.HIGH },
+  { query: 'need software built', priority: QUERY_PRIORITY.HIGH },
+  { query: 'need a platform built', priority: QUERY_PRIORITY.HIGH }
+];
+
 /**
  * Categorized Master Project Query Library
  * Similar wordings are intentional to maximize search engine result variety.
