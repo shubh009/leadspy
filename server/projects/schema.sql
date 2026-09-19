@@ -21,11 +21,21 @@ CREATE TABLE IF NOT EXISTS master_projects (
     
     -- Client / Author Info
     client_name TEXT,
+    client_company TEXT,
+    client_company_url TEXT,
     client_username TEXT,
     client_email TEXT,                            -- Extracted email (if public)
+    client_phone TEXT,                            -- Extracted phone (if public)
     client_profile_url TEXT,                      -- Link to user profile
-    client_contact_method TEXT,                   -- 'email', 'reddit_dm', 'linkedin_message', 'external_link'
-    client_location TEXT,                         -- 'USA', 'UK', 'Remote', etc.
+    client_contact_method TEXT,                   -- 'email', 'phone', 'public_business_contact', 'public_profile_message', 'public_company_website'
+    client_location TEXT,                         -- 'USA', 'UK', 'Delhi NCR', etc.
+    
+    -- Actionable Contactability & Opportunity Metadata (Section 7, 8, 11 of Change Request)
+    has_actionable_contact BOOLEAN DEFAULT true,
+    contact_type TEXT DEFAULT 'none',             -- 'email', 'phone', 'public_business_contact', 'public_profile_message', 'public_company_website', 'none'
+    contact_value TEXT,                           -- email address, phone number, or verified contact URL
+    contactability_score NUMERIC DEFAULT 80,
+    rejection_reason TEXT,                        -- e.g. 'EMPLOYMENT', 'NO_ACTIONABLE_CONTACT'
     
     -- Commercial Details
     budget TEXT,                                  -- e.g. '$2,000 - $5,000'

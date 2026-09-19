@@ -185,8 +185,9 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
 
     // ----------------------------------------------------
     // GATE 3: Hard Reject - Employment / Salaried Jobs / HR
+    // (Sections 2, 6, 22 of Change Request)
     // ----------------------------------------------------
-    const employmentRegex = /\b(full[- ]?time (job|role|position|employee)|permanent (role|position|employee)|annual ctc|ctc\s*:\s*|[\d.]+\s*lpa|job vacancy|job opening|notice period|immediate joiner|send your (resume|cv)|submit (resume|cv)|pf\b|esi\b|hr manager|recruiter|recruitment|benefits package|401k|paid time off|pto)\b/i;
+    const employmentRegex = /\b(software development engineer|sde\b|software engineer\s*[-—–]\s*(mobile|backend|frontend)|full[- ]?time (job|role|position|employee)?|permanent (role|position|employee)|annual ctc|ctc\s*[:=]|[\d.]+\s*lpa|job vacancy|job opening|notice period|immediate joiner|send your (resume|cv)|submit (resume|cv)|join (our|the) team|join our growing team|pf\b|esi\b|hr manager|recruiter|recruitment|benefits package|401k|paid time off|pto|salary\s*[:=]|operator\s*\([^\)]+\))\b/i;
     if (employmentRegex.test(fullText)) {
       return {
         qualification_status: 'rejected',
@@ -213,10 +214,10 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     // ----------------------------------------------------
-    // GATE 5: Non-IT / Corporate Roles Rejection
+    // GATE 5: Non-IT / Non-Project / Adult / Spam Rejection
     // ----------------------------------------------------
-    const nonItRegex = /\b(payroll|student assistant|receptionist|accountant|garment|fashion communication|sales executive|telecaller|bpo)\b/i;
-    if (nonItRegex.test(title)) {
+    const nonItRegex = /\b(payroll|student assistant|receptionist|accountant|garment|fashion|escort|sales executive|telecaller|bpo|data entry|operator)\b/i;
+    if (nonItRegex.test(title) || nonItRegex.test(content.substring(0, 200))) {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'NOT_IT_PROJECT',
