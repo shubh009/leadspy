@@ -505,8 +505,8 @@ export function generateControlledCombinatorialQueries({ cycle = 1, batchSize = 
     const ctx = BUSINESS_CONTEXTS[(i + cycleOffset) % BUSINESS_CONTEXTS.length];
 
     const qStr = (i % 2 === 0)
-      ? `"${intent}" ${deliv} ${ctx} ${NEGATIVE_SEARCH_OPERATORS}`
-      : `"${intent}" ${stage} ${deliv} ${NEGATIVE_SEARCH_OPERATORS}`;
+      ? `"${intent}" ${stage} ${deliv} ${NEGATIVE_SEARCH_OPERATORS}`
+      : `"${intent}" ${deliv} ${ctx} ${NEGATIVE_SEARCH_OPERATORS}`;
 
     webQueries.push(createQuery(qStr, {
       priority: QUERY_PRIORITY.HIGH,

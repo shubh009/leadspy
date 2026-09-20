@@ -22,7 +22,8 @@ import { MultiSearchManager } from '../sources/searchProvider.js';
 import { ContentExtractor } from '../services/contentExtractor.js';
 import { ProjectClassifier } from '../ai/projectClassifier.js';
 import { CanonicalDeduplicator } from '../services/canonicalDeduplicator.js';
-import { saveMasterProjects } from '../services/projectDbService.js';
+import { saveMasterProjects, validateProductionPersistenceConfig } from '../services/projectDbService.js';
+export { validateProductionPersistenceConfig };
 import {
   evaluateCandidateValidityGate,
   getVerificationCacheStats,
@@ -226,6 +227,32 @@ export function shouldPersistDiscoveryLeads(persistToDb, auditOnly) {
   return Boolean(persistToDb) && !auditOnly;
 }
 
+/**
+ * Deterministically allocates queries across cycles with remainder distribution
+ * Validates integer totalQueries within [100, 300] and non-empty cycles array.
+ * 
+ * @param {number} totalQueries
+ * @param {Array<number>} cycles
+ * @returns {Array<number>} batchSize for each cycle summing to totalQueries
+ */
+export function allocateQueriesAcrossCycles(totalQueries, cycles = [1, 2, 3]) {
+  if (!Number.isInteger(totalQueries)) {
+    throw new Error(`Invalid totalQueries: must be an integer, received ${totalQueries}`);
+  }
+  if (totalQueries < 100 || totalQueries > 300) {
+    throw new Error(`Invalid totalQueries: must be between 100 and 300 (inclusive), received ${totalQueries}`);
+  }
+  if (!Array.isArray(cycles) || cycles.length === 0) {
+    throw new Error(`Invalid cycles: must be a non-empty array, received ${JSON.stringify(cycles)}`);
+  }
+
+  const n = cycles.length;
+  const base = Math.floor(totalQueries / n);
+  const remainder = totalQueries % n;
+
+  return cycles.map((_, idx) => (idx < remainder ? base + 1 : base));
+}
+
 export function resolvePhaseDPilotConfig(options = {}) {
   return {
     ...options,
@@ -250,6 +277,9 @@ export async function runFullDiscoveryPipeline(config = {}) {
     auditOnly = false
   } = config;
 
+  // Fail-fast validation of persistence configuration (Gap 7)
+  validateProductionPersistenceConfig(persistToDb, auditOnly);
+
   // Safeguards and thresholds
   const preCrawlThreshold = Number(process.env.PRE_CRAWL_THRESHOLD) || 45;
   const maxCrawlsPerQuery = Number(process.env.MAX_CRAWLS_PER_QUERY) || 3;
@@ -268,8 +298,21 @@ export async function runFullDiscoveryPipeline(config = {}) {
   if (location) console.log(`   Target Location: ${location}`);
   console.log('================================================================\n');
 
-  const rotator = new QueryRotatorService({ days, batchSize, cycle, categories, siteFilter, location, mode });
-  const searchQueries = rotator.getQueriesForCycle({ mode, batchSize });
+  const rotator = new QueryRotatorService({
+    days,
+    batchSize,
+    cycle,
+    categories,
+    siteFilter,
+    location,
+    mode,
+    sourceMetrics: config.sourceMetrics
+  });
+  const searchQueries = rotator.getQueriesForCycle({
+    mode,
+    batchSize,
+    sourceMetrics: config.sourceMetrics
+  });
 
   if (config.dryRun) {
     return {
@@ -290,7 +333,8 @@ export async function runFullDiscoveryPipeline(config = {}) {
 
   const searchManager = new MultiSearchManager();
   const contentExtractor = new ContentExtractor();
-  const canonicalDeduplicator = new CanonicalDeduplicator();
+  // Shared Canonical Deduplicator support across multi-cycle runs (Gap 4)
+  const canonicalDeduplicator = config.canonicalDeduplicator || new CanonicalDeduplicator();
   const classifier = new ProjectClassifier();
 
   const rawCandidatePool = [];
@@ -696,9 +740,24 @@ export async function runFullDiscoveryPipeline(config = {}) {
   const redditSubredditCounts = {};
   let hnCount = 0;
   let ghCount = 0;
+  const queryCrawlCounts = new Map();
+  let crawlCapRejectedByQuery = 0;
 
   for (const candidate of scoredCandidates) {
     if (approvedForCrawl.length >= maxTotalCrawlsPerRun) break;
+
+    // Per-Query Crawl Cap Enforcement (Gap 3)
+    const qStr = candidate.search_query || 'unknown';
+    const currentQueryCrawls = queryCrawlCounts.get(qStr) || 0;
+    if (currentQueryCrawls >= maxCrawlsPerQuery) {
+      crawlCapRejectedByQuery++;
+      candidate.preCrawlEval.rejectionReason = 'QUERY_CRAWL_CAP_REACHED';
+      const stat = queryStatsMap.get(qStr);
+      if (stat) {
+        stat.rejectionReasons['QUERY_CRAWL_CAP_REACHED'] = (stat.rejectionReasons['QUERY_CRAWL_CAP_REACHED'] || 0) + 1;
+      }
+      continue;
+    }
 
     const url = candidate.final_url || candidate.url;
     const domain = getCandidateRootDomain(url);
@@ -724,10 +783,11 @@ export async function runFullDiscoveryPipeline(config = {}) {
       domainCounts[domain] = domCount + 1;
     }
 
+    queryCrawlCounts.set(qStr, currentQueryCrawls + 1);
     approvedForCrawl.push(candidate);
   }
 
-  console.log(`   -> Promising Candidates Scheduled for Deep Crawl: ${approvedForCrawl.length} (Global Cap: ${maxTotalCrawlsPerRun})`);
+  console.log(`   -> Promising Candidates Scheduled for Deep Crawl: ${approvedForCrawl.length} (Global Cap: ${maxTotalCrawlsPerRun} | Per-Query Rejections: ${crawlCapRejectedByQuery})`);
 
   // -------------------------------------------------------------
   // 6. SELECTIVE DEEP CRAWL & CONTENT FINGERPRINT DEDUPLICATION
@@ -767,6 +827,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
   // 7. QUALIFICATION VIA UNTOUCHED 9-GATE ENGINE
   // -------------------------------------------------------------
   const qualifiedProjects = [];
+  const contactableProjects = [];
   const rejectionReasons = {};
   let gate8Duplicates = 0;
 
@@ -774,20 +835,23 @@ export async function runFullDiscoveryPipeline(config = {}) {
     const result = await classifier.qualifyAndExtract(candidate);
     const qStat = queryStatsMap.get(candidate.search_query);
 
-    if (result.qualification_status === 'qualified' && result.has_actionable_contact) {
+    // Retain all qualified projects without destroying qualified uncontactable leads (Gap 5)
+    if (result.qualification_status === 'qualified') {
       result.freshnessStatus = candidate.freshnessStatus || 'fresh';
       result.status = candidate.freshnessStatus === 'archive' ? 'archive' : 'active';
       result.search_query = candidate.search_query;
       result.search_source = candidate.search_source;
 
-      if (qStat) {
-        qStat.qualified++;
-        if (result.contact_type !== 'none') qStat.contactable++;
-      }
       qualifiedProjects.push(result);
+      if (qStat) qStat.qualified++;
+
+      if (result.has_actionable_contact) {
+        contactableProjects.push(result);
+        if (qStat) qStat.contactable++;
+      }
 
       console.log(`🌟 [QUALIFIED] [${result.source.toUpperCase()}] ${result.title.substring(0, 70)}`);
-      console.log(`   -> Contact: ${result.contact_type} (${result.contact_value || result.clientEmail})`);
+      console.log(`   -> Contact: ${result.contact_type} (${result.contact_value || result.clientEmail || 'none'}) | Actionable: ${Boolean(result.has_actionable_contact)}`);
       console.log(`   -> Link: ${result.sourceUrl}\n`);
     } else {
       const reason = result.rejection_reason || 'UNQUALIFIED';
@@ -819,12 +883,13 @@ export async function runFullDiscoveryPipeline(config = {}) {
   console.log(`   Candidate State Breakdown        :`, candidateStateCounts);
   console.log(`   Pre-Filter Accepted              : ${totalPreFilterAccepted}`);
   console.log(`   Pre-Filter Rejected (Zero Crawl) : ${totalPreFilterRejected}`);
+  console.log(`   Crawl Cap Rejected (Per-Query)   : ${crawlCapRejectedByQuery}`);
   console.log(`   Deep Crawled (Promising URLs)    : ${approvedForCrawl.length}`);
   console.log(`   Extraction Failures              : ${extractionFailures}`);
   console.log(`   Candidates Entering Classifier   : ${enrichedCandidates.length}`);
   console.log(`   Gate 8 Semantic Duplicates       : ${gate8Duplicates}`);
   console.log(`   Final Qualified Projects         : ${qualifiedProjects.length}`);
-  console.log(`   Contactable Leads Verified       : ${qualifiedProjects.filter(p => p.has_actionable_contact).length}`);
+  console.log(`   Contactable Leads Verified       : ${contactableProjects.length}`);
   console.log(`   Diagnostic Crawl Reduction Rate  : ${crawlReductionRate}`);
   console.log(`   Rejection Breakdown              :`, rejectionReasons);
   console.log(`   Verification Rejections          :`, verificationRejections);
@@ -856,10 +921,23 @@ export async function runFullDiscoveryPipeline(config = {}) {
   // -------------------------------------------------------------
   // 9. DATABASE PERSISTENCE (Auditable with PERSIST_TO_DB & auditOnly)
   // -------------------------------------------------------------
+  let persistenceResult = { attempted: false, success: true, inserted: 0, updated: 0, total: 0, error: null };
   if (shouldPersist && qualifiedProjects.length > 0) {
     console.log(`💾 Persisting ${qualifiedProjects.length} qualified leads into Database...`);
     const dbRes = await saveMasterProjects(qualifiedProjects);
-    console.log(`✅ Supabase Database updated! Total active projects: ${dbRes.total || qualifiedProjects.length}`);
+    persistenceResult = {
+      attempted: true,
+      success: Boolean(dbRes.success),
+      inserted: dbRes.inserted || 0,
+      updated: dbRes.updated || 0,
+      total: dbRes.total || 0,
+      error: dbRes.error || null
+    };
+    if (dbRes.success) {
+      console.log(`✅ Supabase Database updated! Inserted: ${dbRes.inserted}, Updated: ${dbRes.updated}, Total: ${dbRes.total}`);
+    } else {
+      console.error(`❌ Supabase Database update FAILED: ${dbRes.error}`);
+    }
   } else if (!shouldPersist && qualifiedProjects.length > 0) {
     console.log(`🔍 [AUDIT RUN] Persistence disabled (persistToDb=${persistToDb}, auditOnly=${auditOnly}). Generated ${qualifiedProjects.length} qualified leads without modifying DB.`);
   }
@@ -868,6 +946,8 @@ export async function runFullDiscoveryPipeline(config = {}) {
     mode,
     cycle,
     projects: qualifiedProjects,
+    contactableProjects,
+    persistence: persistenceResult,
     metrics: {
       rawResults: dedupMetrics.rawResults,
       uniqueResults: totalEvaluated,
@@ -885,13 +965,14 @@ export async function runFullDiscoveryPipeline(config = {}) {
       candidateStates: candidateStateCounts,
       preFilterAccepted: totalPreFilterAccepted,
       preFilterRejected: totalPreFilterRejected,
+      crawlCapRejectedByQuery,
       deepCrawled: approvedForCrawl.length,
       extractionFailures,
       candidatesEnteringClassifier: enrichedCandidates.length,
       gate8Duplicates,
       finalUniqueCandidates,
       qualifiedProjects: qualifiedProjects.length,
-      contactableProjects: qualifiedProjects.filter(p => p.has_actionable_contact).length,
+      contactableProjects: contactableProjects.length,
       crawlReductionRate
     },
     rejectionReasons,
@@ -932,16 +1013,38 @@ export async function runProductionScaledDiscovery(options = {}) {
     mode = DISCOVERY_MODE.STANDARD
   } = options;
 
+  // Fail-fast environment validation (Gap 7)
+  validateProductionPersistenceConfig(persistToDb, auditOnly);
+
+  // Exact query allocation across cycles with remainder distribution (Gap 1)
+  const cycleBatchSizes = allocateQueriesAcrossCycles(totalQueries, cycles);
+
   console.log('================================================================');
   console.log(`🚀 [PHASE E] PRODUCTION SCALED DISCOVERY RUNNER`);
-  console.log(`   Target Queries: ${totalQueries} | Cycles: ${cycles.join(', ')} | Days: ${days}`);
+  console.log(`   Target Queries: ${totalQueries} (Distribution: ${cycleBatchSizes.join(', ')}) | Cycles: ${cycles.join(', ')} | Days: ${days}`);
   console.log(`   Persistence Mode: ${persistToDb && !auditOnly ? 'ACTIVE (Supabase DB writes ENABLED)' : 'AUDIT ONLY (DB writes BLOCKED)'}`);
   console.log('================================================================\n');
 
-  // Allocate queries per cycle
-  const queriesPerCycle = Math.ceil(totalQueries / cycles.length);
+  // Shared Canonical Deduplicator across all Phase E cycles (Gap 4)
+  const sharedCanonicalDeduplicator = options.canonicalDeduplicator || new CanonicalDeduplicator();
+
+  // Adaptive source metrics feedback accumulator (Gap 2)
+  const cumulativeSourceMetrics = {
+    reddit: { actionableProjects: 0, processed: 0 },
+    hackernews: { actionableProjects: 0, processed: 0 },
+    public_web: { actionableProjects: 0, processed: 0 }
+  };
+
+  function normalizeSourceKey(src = '') {
+    const s = String(src).toLowerCase();
+    if (s.includes('reddit')) return 'reddit';
+    if (s.includes('hacker') || s.includes('hn')) return 'hackernews';
+    return 'public_web';
+  }
+
   const cycleResults = [];
   const allQualifiedProjects = [];
+  const allContactableProjects = [];
   const aggregatedMetrics = {
     totalQueriesExecuted: 0,
     rawResults: 0,
@@ -957,37 +1060,58 @@ export async function runProductionScaledDiscovery(options = {}) {
     pageFetchFailures: 0,
     verificationCacheHits: 0,
     verificationCacheMisses: 0,
+    crawlCapRejectedByQuery: 0,
     deepCrawled: 0,
     qualifiedProjects: 0,
     contactableProjects: 0
   };
 
-  for (const cycleNum of cycles) {
-    console.log(`\n--- Executing Cycle ${cycleNum} (${queriesPerCycle} queries) ---`);
+  for (let i = 0; i < cycles.length; i++) {
+    const cycleNum = cycles[i];
+    const batchSize = cycleBatchSizes[i];
+
+    // Compute and log adaptive source quotas before each cycle (Gap 2)
+    const currentQuotas = QueryRotatorService.calculateSourceQuotas(cumulativeSourceMetrics, batchSize);
+    console.log(`[PHASE E] Source allocation before Cycle ${cycleNum}:`, JSON.stringify(cumulativeSourceMetrics));
+    console.log(`[PHASE E] Source quotas for Cycle ${cycleNum}:`, JSON.stringify(currentQuotas));
+
+    console.log(`\n--- Executing Cycle ${cycleNum} (${batchSize} queries) ---`);
     const cycleRes = await runFullDiscoveryPipeline({
       ...options,
       cycle: cycleNum,
-      batchSize: queriesPerCycle,
+      batchSize,
       days,
       persistToDb,
       auditOnly,
       dryRun,
-      mode
+      mode,
+      canonicalDeduplicator: sharedCanonicalDeduplicator,
+      sourceMetrics: { ...cumulativeSourceMetrics }
     });
 
     cycleResults.push(cycleRes);
 
     if (dryRun) {
-      aggregatedMetrics.totalQueriesExecuted += (cycleRes.queries?.length || 0);
+      aggregatedMetrics.totalQueriesExecuted += (cycleRes.queries?.length || batchSize);
       continue;
+    }
+
+    // Accumulate source performance feedback from cycle
+    for (const item of (cycleRes.queryBreakdown || [])) {
+      const key = normalizeSourceKey(item.source);
+      cumulativeSourceMetrics[key].processed += (item.rawResults || item.uniqueResults || 0);
+      cumulativeSourceMetrics[key].actionableProjects += (item.contactable || item.qualified || 0);
     }
 
     if (cycleRes.projects && cycleRes.projects.length > 0) {
       allQualifiedProjects.push(...cycleRes.projects);
     }
+    if (cycleRes.contactableProjects && cycleRes.contactableProjects.length > 0) {
+      allContactableProjects.push(...cycleRes.contactableProjects);
+    }
 
     if (cycleRes.metrics) {
-      aggregatedMetrics.totalQueriesExecuted += queriesPerCycle;
+      aggregatedMetrics.totalQueriesExecuted += batchSize;
       aggregatedMetrics.rawResults += cycleRes.metrics.rawResults || 0;
       aggregatedMetrics.uniqueResults += cycleRes.metrics.uniqueResults || 0;
       aggregatedMetrics.linkHealthChecked += cycleRes.metrics.linkHealthChecked || 0;
@@ -1001,6 +1125,7 @@ export async function runProductionScaledDiscovery(options = {}) {
       aggregatedMetrics.pageFetchFailures += cycleRes.metrics.pageFetchFailures || 0;
       aggregatedMetrics.verificationCacheHits += cycleRes.metrics.verificationCacheHits || 0;
       aggregatedMetrics.verificationCacheMisses += cycleRes.metrics.verificationCacheMisses || 0;
+      aggregatedMetrics.crawlCapRejectedByQuery += cycleRes.metrics.crawlCapRejectedByQuery || 0;
       aggregatedMetrics.deepCrawled += cycleRes.metrics.deepCrawled || 0;
       aggregatedMetrics.qualifiedProjects += cycleRes.metrics.qualifiedProjects || 0;
       aggregatedMetrics.contactableProjects += cycleRes.metrics.contactableProjects || 0;
@@ -1011,27 +1136,48 @@ export async function runProductionScaledDiscovery(options = {}) {
     ? `${((1 - (aggregatedMetrics.deepCrawled / aggregatedMetrics.uniqueResults)) * 100).toFixed(1)}%`
     : '0.0%';
 
+  let persistenceStatus = 'NOT_ATTEMPTED';
+  let overallStatus = 'COMPLETED';
+  if (persistToDb && !auditOnly) {
+    const attemptedCycles = cycleResults.filter(cr => cr.persistence && cr.persistence.attempted);
+    const anyFailed = attemptedCycles.some(cr => !cr.persistence.success);
+    if (anyFailed) {
+      persistenceStatus = 'PERSISTENCE_FAILURE';
+      overallStatus = allQualifiedProjects.length > 0 ? 'PARTIAL_SUCCESS' : 'PERSISTENCE_FAILURE';
+    } else {
+      persistenceStatus = `PERSISTED_TO_SUPABASE (${allQualifiedProjects.length} leads)`;
+      overallStatus = 'COMPLETED';
+    }
+  } else {
+    persistenceStatus = 'AUDIT_ONLY (0 DB mutations)';
+  }
+
   console.log('\n================================================================');
   console.log(`🏁 [PHASE E COMPLETE] AGGREGATED PRODUCTION DISCOVERY METRICS:`);
+  console.log(`   Status                           : ${overallStatus}`);
   console.log(`   Cycles Executed                  : ${cycles.join(', ')}`);
   console.log(`   Total Queries Run                : ${aggregatedMetrics.totalQueriesExecuted}`);
   console.log(`   Total Raw Results                : ${aggregatedMetrics.rawResults}`);
   console.log(`   Total Unique Results             : ${aggregatedMetrics.uniqueResults}`);
   console.log(`   Link Health Checked / Passed     : ${aggregatedMetrics.linkHealthChecked} / ${aggregatedMetrics.linkHealthPassed}`);
   console.log(`   Page Validity Checked / Passed   : ${aggregatedMetrics.pageValidityChecked} / ${aggregatedMetrics.pageValidityPassed}`);
+  console.log(`   Crawl Cap Rejected (Per-Query)   : ${aggregatedMetrics.crawlCapRejectedByQuery}`);
   console.log(`   Total Deep Crawled               : ${aggregatedMetrics.deepCrawled} (Crawl Reduction: ${overallCrawlReductionRate})`);
   console.log(`   Total Qualified Leads Found      : ${aggregatedMetrics.qualifiedProjects}`);
   console.log(`   Actionable Contactable Leads     : ${aggregatedMetrics.contactableProjects}`);
-  console.log(`   Persistence Status               : ${persistToDb && !auditOnly ? `SAVED TO SUPABASE (${allQualifiedProjects.length} leads)` : 'AUDIT ONLY (0 DB mutations)'}`);
+  console.log(`   Persistence Status               : ${persistenceStatus}`);
   console.log('================================================================\n');
 
   return {
+    status: overallStatus,
+    persistenceStatus,
     mode,
     totalQueries,
     cycles,
     persistToDb: Boolean(persistToDb && !auditOnly),
     auditOnly,
     projects: allQualifiedProjects,
+    contactableProjects: allContactableProjects,
     aggregatedMetrics,
     cycleResults
   };

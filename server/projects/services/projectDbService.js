@@ -10,10 +10,42 @@ import crypto from 'crypto';
 let IN_MEMORY_PROJECTS = [];
 let IN_MEMORY_SAVED = [];
 
+export function validateProductionPersistenceConfig(persistToDb = false, auditOnly = true) {
+  const shouldPersist = Boolean(persistToDb) && !auditOnly;
+  if (!shouldPersist) {
+    return { valid: true, mode: 'AUDIT' };
+  }
+
+  const url = process.env.SUPABASE_URL?.trim();
+  const key = process.env.SUPABASE_KEY?.trim();
+
+  const isMissing = !url || !key;
+  const isPlaceholderUrl = !url || url.includes('placeholder.supabase.co');
+  const isPlaceholderKey = !key || key === 'placeholder-anon-key';
+
+  if (isMissing || isPlaceholderUrl || isPlaceholderKey) {
+    throw new Error(
+      'Production persistence requires valid SUPABASE_URL and SUPABASE_KEY in environment. Found placeholder or missing credentials.'
+    );
+  }
+
+  return { valid: true, mode: 'PRODUCTION' };
+}
+
 export async function saveMasterProjects(projects = []) {
-  if (!projects || projects.length === 0) return { inserted: 0, updated: 0 };
+  if (!projects || projects.length === 0) {
+    return {
+      success: true,
+      attempted: 0,
+      inserted: 0,
+      updated: 0,
+      total: IN_MEMORY_PROJECTS.length,
+      error: null
+    };
+  }
 
   let insertedCount = 0;
+  let updatedCount = 0;
 
   for (const p of projects) {
     // Generate unique, deterministic canonical ID using MD5 hash of source_url
@@ -58,6 +90,7 @@ export async function saveMasterProjects(projects = []) {
     const existingIdx = IN_MEMORY_PROJECTS.findIndex(item => item.source_url === record.source_url);
     if (existingIdx >= 0) {
       IN_MEMORY_PROJECTS[existingIdx] = { ...IN_MEMORY_PROJECTS[existingIdx], ...record, id: IN_MEMORY_PROJECTS[existingIdx].id };
+      updatedCount++;
     } else {
       record.id = record.id || `proj-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
       IN_MEMORY_PROJECTS.unshift(record);
@@ -65,64 +98,100 @@ export async function saveMasterProjects(projects = []) {
     }
   }
 
-  // Batch Upsert to Supabase in ONE single fast query
-  try {
-    if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY && projects.length > 0) {
-      const seen = new Set();
-      const recordsToUpsert = [];
+  const url = process.env.SUPABASE_URL?.trim();
+  const key = process.env.SUPABASE_KEY?.trim();
+  const isPlaceholderUrl = !url || url.includes('placeholder.supabase.co');
+  const isPlaceholderKey = !key || key === 'placeholder-anon-key';
 
-      for (const p of IN_MEMORY_PROJECTS) {
-        const cid = p.canonical_id || `proj-${crypto.createHash('md5').update(p.source_url || p.title || String(Math.random())).digest('hex')}`;
-        if (!seen.has(cid)) {
-          seen.add(cid);
-          recordsToUpsert.push({
-            canonical_id: cid,
-            source: p.source || 'web',
-            source_url: p.source_url,
-            source_post_id: p.source_post_id || null,
-            title: p.title,
-            short_summary: p.short_summary,
-            original_description: p.original_description,
-            category: p.category || 'Web Development',
-            subcategory: p.subcategory || null,
-            skills: p.skills || [],
-            features: p.features || [],
-            client_name: p.client_name || p.client_company || 'Direct Client',
-            client_username: p.client_username || null,
-            client_email: p.client_email || (p.contact_value && p.contact_value.includes('@') ? p.contact_value : null),
-            client_profile_url: p.client_profile_url || (p.contact_value && /^https?:\/\//i.test(p.contact_value) ? p.contact_value : null) || p.client_company_url || null,
-            client_contact_method: p.contact_type || p.client_contact_method || (p.client_email || (p.contact_value && p.contact_value.includes('@')) ? 'email' : (p.client_profile_url || (p.contact_value && /^https?:\/\//i.test(p.contact_value)) ? 'public_profile_message' : 'none')),
-            client_location: p.client_location || null,
-            budget: p.budget || null,
-            budget_min: p.budget_min || null,
-            budget_max: p.budget_max || null,
-            currency: p.currency || 'USD',
-            project_type: p.project_type || 'Contract',
-            intent: p.intent || 'Looking for Developer',
-            relevance_score: p.relevance_score || 85,
-            posted_at: p.posted_at || new Date().toISOString(),
-            discovered_at: p.discovered_at || new Date().toISOString(),
-            last_seen_at: p.last_seen_at || new Date().toISOString(),
-            status: 'active'
-          });
-        }
-      }
-
-      const { error } = await supabase
-        .from('master_projects')
-        .upsert(recordsToUpsert, { onConflict: 'source_url' });
-
-      if (error) {
-        console.warn('Supabase batch upsert warning:', error.message);
-      } else {
-        console.log(`✅ Upserted ${recordsToUpsert.length} unique live projects to Supabase.`);
-      }
-    }
-  } catch (err) {
-    console.warn('Supabase sync notice:', err.message);
+  if (isPlaceholderUrl || isPlaceholderKey) {
+    return {
+      success: false,
+      attempted: projects.length,
+      inserted: insertedCount,
+      updated: updatedCount,
+      total: IN_MEMORY_PROJECTS.length,
+      error: 'Supabase credentials missing or set to placeholder values'
+    };
   }
 
-  return { inserted: insertedCount, total: IN_MEMORY_PROJECTS.length };
+  // Batch Upsert to Supabase in ONE single fast query
+  try {
+    const seen = new Set();
+    const recordsToUpsert = [];
+
+    for (const p of IN_MEMORY_PROJECTS) {
+      const cid = p.canonical_id || `proj-${crypto.createHash('md5').update(p.source_url || p.title || String(Math.random())).digest('hex')}`;
+      if (!seen.has(cid)) {
+        seen.add(cid);
+        recordsToUpsert.push({
+          canonical_id: cid,
+          source: p.source || 'web',
+          source_url: p.source_url,
+          source_post_id: p.source_post_id || null,
+          title: p.title,
+          short_summary: p.short_summary,
+          original_description: p.original_description,
+          category: p.category || 'Web Development',
+          subcategory: p.subcategory || null,
+          skills: p.skills || [],
+          features: p.features || [],
+          client_name: p.client_name || p.client_company || 'Direct Client',
+          client_username: p.client_username || null,
+          client_email: p.client_email || (p.contact_value && p.contact_value.includes('@') ? p.contact_value : null),
+          client_profile_url: p.client_profile_url || (p.contact_value && /^https?:\/\//i.test(p.contact_value) ? p.contact_value : null) || p.client_company_url || null,
+          client_contact_method: p.contact_type || p.client_contact_method || (p.client_email || (p.contact_value && p.contact_value.includes('@')) ? 'email' : (p.client_profile_url || (p.contact_value && /^https?:\/\//i.test(p.contact_value)) ? 'public_profile_message' : 'none')),
+          client_location: p.client_location || null,
+          budget: p.budget || null,
+          budget_min: p.budget_min || null,
+          budget_max: p.budget_max || null,
+          currency: p.currency || 'USD',
+          project_type: p.project_type || 'Contract',
+          intent: p.intent || 'Looking for Developer',
+          relevance_score: p.relevance_score || 85,
+          posted_at: p.posted_at || new Date().toISOString(),
+          discovered_at: p.discovered_at || new Date().toISOString(),
+          last_seen_at: p.last_seen_at || new Date().toISOString(),
+          status: 'active'
+        });
+      }
+    }
+
+    const { error } = await supabase
+      .from('master_projects')
+      .upsert(recordsToUpsert, { onConflict: 'source_url' });
+
+    if (error) {
+      console.warn('Supabase batch upsert warning:', error.message);
+      return {
+        success: false,
+        attempted: projects.length,
+        inserted: 0,
+        updated: 0,
+        total: IN_MEMORY_PROJECTS.length,
+        error: error.message
+      };
+    }
+
+    console.log(`✅ Upserted ${recordsToUpsert.length} unique live projects to Supabase.`);
+    return {
+      success: true,
+      attempted: projects.length,
+      inserted: insertedCount,
+      updated: updatedCount,
+      total: IN_MEMORY_PROJECTS.length,
+      error: null
+    };
+  } catch (err) {
+    console.warn('Supabase sync notice:', err.message);
+    return {
+      success: false,
+      attempted: projects.length,
+      inserted: 0,
+      updated: 0,
+      total: IN_MEMORY_PROJECTS.length,
+      error: err.message
+    };
+  }
 }
 
 export async function getProjects({
