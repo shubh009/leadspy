@@ -358,7 +358,9 @@ export function applySiteFilter(queryStr, domain) {
 // -------------------------------------------------------------
 // STEP-1 V2: CONTROLLED COMBINATORIAL QUERY MATRIX & FOOTPRINTS
 // -------------------------------------------------------------
-export const NEGATIVE_SEARCH_OPERATORS = '-job -jobs -career -careers -salary -resume -internship -recruiter -recruitment';
+// Negative search operators removed to avoid search engine query parsing degradation.
+// Downstream pre-crawl scoring (scoreSearchResult) and 9-gate classifier filter out employment/jobs.
+export const NEGATIVE_SEARCH_OPERATORS = '';
 
 export const COMBINATORIAL_DIMENSIONS = {
   BUYER_INTENTS: [
@@ -403,10 +405,10 @@ export const COMBINATORIAL_DIMENSIONS = {
 };
 
 export const CONTROLLED_QUERY_TEMPLATES = [
-  // 1. Primary Buyer Need (Quoted intent + open terms + negative operators)
-  (intent, stage, deliv, ctx) => `"${intent}" ${deliv} ${ctx} ${NEGATIVE_SEARCH_OPERATORS}`,
+  // 1. Primary Buyer Need (Quoted intent + open terms)
+  (intent, stage, deliv, ctx) => `"${intent}" ${deliv} ${ctx}`.trim(),
   // 2. Stage + Deliverable
-  (intent, stage, deliv, ctx) => `"${intent}" ${stage} ${deliv} ${NEGATIVE_SEARCH_OPERATORS}`,
+  (intent, stage, deliv, ctx) => `"${intent}" ${stage} ${deliv}`.trim(),
   // 3. Reddit Platform Footprints
   (intent, stage, deliv, ctx) => `site:reddit.com/r/forhire "[Hiring]" ${deliv}`,
   (intent, stage, deliv, ctx) => `site:reddit.com/r/freelance_forhire "[Hiring]" ${deliv}`,
@@ -415,7 +417,7 @@ export const CONTROLLED_QUERY_TEMPLATES = [
   // 5. RFP / Procurement Footprint
   (intent, stage, deliv, ctx) => `filetype:pdf "request for proposal" "${deliv}" 2026`,
   // 6. Exploratory Query (15% allocation)
-  (intent, stage, deliv, ctx) => `"${intent}" ${deliv} ${NEGATIVE_SEARCH_OPERATORS}`
+  (intent, stage, deliv, ctx) => `"${intent}" ${deliv}`.trim()
 ];
 
 /**
@@ -505,8 +507,8 @@ export function generateControlledCombinatorialQueries({ cycle = 1, batchSize = 
     const ctx = BUSINESS_CONTEXTS[(i + cycleOffset) % BUSINESS_CONTEXTS.length];
 
     const qStr = (i % 2 === 0)
-      ? `"${intent}" ${stage} ${deliv} ${NEGATIVE_SEARCH_OPERATORS}`
-      : `"${intent}" ${deliv} ${ctx} ${NEGATIVE_SEARCH_OPERATORS}`;
+      ? `"${intent}" ${stage} ${deliv}`
+      : `"${intent}" ${deliv} ${ctx}`;
 
     webQueries.push(createQuery(qStr, {
       priority: QUERY_PRIORITY.HIGH,
@@ -522,7 +524,7 @@ export function generateControlledCombinatorialQueries({ cycle = 1, batchSize = 
   for (let i = 0; i < exploratoryCount; i++) {
     const intent = BUYER_INTENTS[(i + cycleOffset + 4) % BUYER_INTENTS.length];
     const deliv = DELIVERABLES[(i + cycleOffset + 6) % DELIVERABLES.length];
-    webQueries.push(createQuery(`"${intent}" ${deliv} ${NEGATIVE_SEARCH_OPERATORS}`, {
+    webQueries.push(createQuery(`"${intent}" ${deliv}`, {
       priority: QUERY_PRIORITY.MEDIUM,
       intentType: 'buyer_request',
       deliverableType: deliv.toLowerCase().replace(/\s+/g, '_'),

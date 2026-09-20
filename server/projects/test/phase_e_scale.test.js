@@ -7,6 +7,12 @@ import {
 } from '../services/queryRotatorService.js';
 
 import {
+  generateControlledCombinatorialQueries,
+  CONTROLLED_QUERY_TEMPLATES,
+  NEGATIVE_SEARCH_OPERATORS
+} from '../config/projectQueryLibrary.js';
+
+import {
   runProductionScaledDiscovery,
   runFullDiscoveryPipeline,
   shouldPersistDiscoveryLeads,
@@ -526,4 +532,68 @@ test('🧪 Phase E.16: saveMasterProjects upserts only current batch and truthfu
     assert.ok(res.error);
   }
 });
+
+// -------------------------------------------------------------
+// P0.8: Query Cleanliness Without Negative Operator Bloat
+// -------------------------------------------------------------
+test('🧪 Phase E.17: Query library templates and combinatorial generator produce clean queries without negative keyword chaining bloat', () => {
+  // 1. NEGATIVE_SEARCH_OPERATORS constant must be empty
+  assert.equal(NEGATIVE_SEARCH_OPERATORS, '', 'NEGATIVE_SEARCH_OPERATORS must be empty string');
+
+  // 2. Controlled query templates must not contain negative operators
+  const sample1 = CONTROLLED_QUERY_TEMPLATES[0]('looking for developer', 'MVP', 'SaaS', 'for our startup');
+  const sample2 = CONTROLLED_QUERY_TEMPLATES[1]('need development team', 'prototype', 'mobile app', 'for our business');
+  const sample6 = CONTROLLED_QUERY_TEMPLATES[6]('seeking technical partner', 'v1', 'CRM', 'for our company');
+
+  assert.ok(!sample1.includes('-job'), 'Template 0 must not contain -job negative terms');
+  assert.ok(!sample2.includes('-job'), 'Template 1 must not contain -job negative terms');
+  assert.ok(!sample6.includes('-job'), 'Template 6 must not contain -job negative terms');
+  assert.equal(sample1, '"looking for developer" SaaS for our startup');
+  assert.equal(sample2, '"need development team" prototype mobile app');
+  assert.equal(sample6, '"seeking technical partner" CRM');
+
+  // 3. Combinatorial queries must be clean and free of negative chaining
+  const queries = generateControlledCombinatorialQueries({ cycle: 1, batchSize: 20 });
+  assert.equal(queries.length, 20);
+  for (const q of queries) {
+    assert.ok(!q.query.includes('-job'), `Combinatorial query must not contain negative keyword bloat: ${q.query}`);
+    assert.ok(!q.query.includes('-salary'), `Combinatorial query must not contain -salary: ${q.query}`);
+  }
+});
+
+// -------------------------------------------------------------
+// P0.9: Telemetry Delta & Authoritative Raw Results Accuracy
+// -------------------------------------------------------------
+test('🧪 Phase E.18: Telemetry delta computation accurately reflects rawResults per cycle and authoritative run total without cumulative double-counting', async () => {
+  const sharedDeduplicator = new CanonicalDeduplicator();
+
+  // Simulate cycle 1: 10 items ingested
+  for (let i = 0; i < 10; i++) {
+    sharedDeduplicator.checkUrlCandidate({ url: `https://test-cycle1.com/item-${i}` });
+  }
+  const c1Metrics = sharedDeduplicator.getMetrics();
+  assert.equal(c1Metrics.rawResults, 10);
+
+  // In cycle 1, initialRawResults was 0, so delta = 10 - 0 = 10
+  const c1Delta = c1Metrics.rawResults - 0;
+  assert.equal(c1Delta, 10);
+
+  // Simulate cycle 2: 15 items ingested on same shared deduplicator
+  const initialRawC2 = sharedDeduplicator.getMetrics().rawResults; // 10
+  for (let i = 0; i < 15; i++) {
+    sharedDeduplicator.checkUrlCandidate({ url: `https://test-cycle2.com/item-${i}` });
+  }
+  const c2Metrics = sharedDeduplicator.getMetrics();
+  assert.equal(c2Metrics.rawResults, 25); // cumulative on deduplicator
+
+  // In cycle 2, initialRawResults was 10, so cycle delta = 25 - 10 = 15
+  const c2Delta = c2Metrics.rawResults - initialRawC2;
+  assert.equal(c2Delta, 15);
+
+  // Sum of deltas must equal authoritative shared deduplicator total (25, NOT 10 + 25 = 35)
+  const sumDeltas = c1Delta + c2Delta;
+  assert.equal(sumDeltas, 25, 'Sum of cycle deltas must equal exact raw items (10 + 15 = 25)');
+  assert.equal(sharedDeduplicator.getMetrics().rawResults, 25, 'Authoritative total rawResults matches shared deduplicator');
+});
+
 

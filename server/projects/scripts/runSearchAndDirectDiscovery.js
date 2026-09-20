@@ -437,6 +437,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
   const contentExtractor = new ContentExtractor();
   // Shared Canonical Deduplicator support across multi-cycle runs (Gap 4)
   const canonicalDeduplicator = config.canonicalDeduplicator || new CanonicalDeduplicator();
+  const initialRawResults = canonicalDeduplicator.getMetrics().rawResults;
   const classifier = config.classifier || new ProjectClassifier({
     strictContactRequirement: false,
     finalConfidenceThreshold: Number(process.env.FINAL_CONFIDENCE_THRESHOLD) || 70,
@@ -1039,7 +1040,8 @@ export async function runFullDiscoveryPipeline(config = {}) {
     contactableProjects,
     persistence: persistenceResult,
     metrics: {
-      rawResults: dedupMetrics.rawResults,
+      rawResults: dedupMetrics.rawResults - initialRawResults,
+      cumulativeRawResults: dedupMetrics.rawResults,
       uniqueResults: totalEvaluated,
       linkHealthChecked,
       linkHealthPassed,
@@ -1236,6 +1238,9 @@ export async function runProductionScaledDiscovery(options = {}) {
     aggregatedMetrics.phaseECrawlBudget = sharedCrawlBudget.getMetrics();
     aggregatedMetrics.diversityCounts = sharedDiversityBudget.getCounts();
   }
+
+  // Authoritative total raw results directly from shared deduplicator (prevents multi-cycle sum drift)
+  aggregatedMetrics.rawResults = sharedCanonicalDeduplicator.getMetrics().rawResults;
 
   const overallCrawlReductionRate = aggregatedMetrics.uniqueResults > 0
     ? `${((1 - (aggregatedMetrics.deepCrawled / aggregatedMetrics.uniqueResults)) * 100).toFixed(1)}%`
