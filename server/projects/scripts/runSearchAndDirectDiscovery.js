@@ -76,7 +76,7 @@ export function scoreSearchResult(item, context = {}) {
 
   // 1. POSITIVE SIGNALS
   // 1.1 Direct Buyer Intent (+30)
-  const buyerIntentRegex = /\b(need|needs|looking for|seeking|want to build|looking to outsource|our company|for our business|hiring (an?\s*)?(developer|agency|team|someone|firm)|request for proposal|rfp|scope of work|proposal|budget|quote|vendor|agency|technology partner)\b/i;
+  const buyerIntentRegex = /\b(need|needs|looking for|seeking|want to build|looking to outsource|our company|for our business|hiring (an?\s*)?(developer|agency|team|someone|firm)|request for proposal|rfp|scope of work|proposal|budget|quote|vendor|agency|technology partner|looking to hire|need someone who can|seeking agency|want to outsource|need a dev to build|mvp development)\b/i;
   if (buyerIntentRegex.test(fullText)) {
     score += 30;
     const m = fullText.match(buyerIntentRegex);
@@ -91,8 +91,8 @@ export function scoreSearchResult(item, context = {}) {
     positiveSignals.push(`IT deliverable: "${m[0]}"`);
   }
 
-  // 1.3 Project / Procurement Signal (+20)
-  const procurementRegex = /\b(request for proposal|rfp|scope of work|statement of work|fixed price|contract project|budget\s*[:=$]|project budget|send proposal|quotation|paid contract|paid project|paid gig)\b/i;
+  // 1.3 Project / Procurement / Commercial Signal (+20)
+  const procurementRegex = /\b(request for proposal|rfp|scope of work|statement of work|fixed price|contract project|budget\s*[:=$]|project budget|send proposal|quotation|paid contract|paid project|paid gig|paid|stipend|fee|milestone|invoice|retainer)\b/i;
   if (procurementRegex.test(fullText)) {
     score += 20;
     const m = fullText.match(procurementRegex);
@@ -108,7 +108,7 @@ export function scoreSearchResult(item, context = {}) {
   }
 
   // 1.5 Direct Outreach / Contact Signal (+10)
-  const contactSignalRegex = /\b(contact\s*(us|me)?|email|dm me|pm me|inbox|send details|apply at|quote)\b/i;
+  const contactSignalRegex = /\b(contact\s*(us|me)?|email|dm me|pm me|inbox|send details|reach out|apply at|quote)\b/i;
   if (contactSignalRegex.test(fullText)) {
     score += 10;
     positiveSignals.push('Outreach/Contact signal');
@@ -120,36 +120,46 @@ export function scoreSearchResult(item, context = {}) {
     positiveSignals.push('Query Quality Tier A');
   }
 
-  // 2. NEGATIVE SIGNALS (Context-Aware)
+  // 2. NEGATIVE SIGNALS (Context-Aware with Negation Safeguard)
   // 2.1 Job / Employment Signal (-50)
   const isFeatureSalary = /salary\s*(calculation|module|component|system|slip)/i.test(fullText);
-  const employmentRegex = /\b(senior\s*(software|react|node|frontend|backend)\s*developer|sde\b|full[- ]?time (job|role|position|employee)|permanent (role|position)|annual ctc|ctc\s*[:=]|[\d.]+\s*lpa|job vacancy|job opening|notice period|submit resume|send your cv|join our team|401k|benefits package|benefits include|years of experience required|apply at|\$\d+k salary|w2 role)\b/i;
-  if (!isFeatureSalary && employmentRegex.test(fullText)) {
+  const isNegatedEmployment = /\b(not\s+(a\s+)?(salaried|full-time|employee|job|w2|employment|in-house)|no\s+(full-time|salaried)\s+(agencies|roles|developers|staff)?|not\s+hiring\s+(employees|staff|in-house))\b/i.test(fullText);
+  
+  const employmentRegex = /\b(benefits include|years of experience required|apply at|competitive compensation|submit your application|we offer healthcare|equal opportunity employer|w2 role|notice period|senior\s*(software|react|node|frontend|backend)\s*developer|sde\b|full[- ]?time (job|role|position|employee)|permanent (role|position)|annual ctc|ctc\s*[:=]|[\d.]+\s*lpa|job vacancy|job opening|submit resume|send your cv|join our team|401k|benefits package|\$\d+k salary)\b/i;
+
+  if (!isFeatureSalary && !isNegatedEmployment && employmentRegex.test(fullText)) {
     score -= 50;
     negativeSignals.push('Employment/Salaried job signal');
   }
 
-  // 2.2 Internship / Trainee (-50)
+  // 2.2 Supply-Side Freelancer Self-Pitch Lockout (-50)
+  const selfPitchRegex = /\b(i am a developer|my portfolio|for hire|hire me|available for freelance|my agency is looking for clients|offering my services|check out my work|available for new projects|hire our team|we are an agency offering)\b/i;
+  if (selfPitchRegex.test(fullText)) {
+    score -= 50;
+    negativeSignals.push('Supply-side freelancer/agency self-pitch');
+  }
+
+  // 2.3 Internship / Trainee (-50)
   if (/\b(intern\b|internship|apprenticeship|trainee|stipend)\b/i.test(fullText)) {
     score -= 50;
     negativeSignals.push('Internship/Trainee signal');
   }
 
-  // 2.3 Educational / Tutorial / Guide / Informational Blog (-45)
+  // 2.4 Educational / Informational Blog (-45)
   const informationalArticleRegex = /\b(why (you|businesses|companies) need|top \d+ reasons|reasons (you|businesses) need|how to (learn|build|use|setup|choose)|guide to|tutorial|course|learn react|documentation|step by step guide|definition of|read our blog)\b/i;
   if (informationalArticleRegex.test(fullText)) {
     score -= 45;
     negativeSignals.push('Informational blog/article/guide');
   }
 
-  // 2.4 Technical Discussion / Comparison (-35)
+  // 2.5 Technical Discussion / Comparison (-35)
   const discussionRegex = /\b(ask hn|what is the best|which (framework|stack|library) is better|what do you think of|pros and cons|vs\b|comparison|reddit discussion)\b/i;
   if (discussionRegex.test(fullText)) {
     score -= 35;
     negativeSignals.push('General technical discussion/question');
   }
 
-  // 2.5 Product / Marketing URL Paths (-30)
+  // 2.6 Product / Marketing URL Paths (-30)
   const isProductPath = /\/(pricing|features|blog|docs|documentation|about|services|category|tag|author)\b/i.test(url) ||
                         /\b(download (our|the)? (software|app|tool)|features and download|welcome to our (website|software))\b/i.test(fullText);
   if (isProductPath) {
@@ -157,7 +167,7 @@ export function scoreSearchResult(item, context = {}) {
     negativeSignals.push('Product homepage or marketing blog path');
   }
 
-  // 2.6 Pure Marketing / Non-IT Gig (-45)
+  // 2.7 Pure Marketing / Non-IT Gig (-45)
   const isCustomAutomationSoftware = /marketing automation\s*(software|platform|system|tool|app)/i.test(fullText);
   const nonItRegex = /\b(marketing agency|social media marketing|seo agency|copywriter|content writer|virtual assistant|va\b|video editor|manage instagram|reels creator)\b/i;
   if (!isCustomAutomationSoftware && nonItRegex.test(fullText)) {
@@ -165,7 +175,7 @@ export function scoreSearchResult(item, context = {}) {
     negativeSignals.push('Non-IT marketing/agency service');
   }
 
-  // 2.7 Blacklisted Domains (-100)
+  // 2.8 Blacklisted Domains (-100)
   const domain = (item.sourceDomain || '').toLowerCase();
   const isBlacklisted = domain.includes('merriam-webster') ||
                         domain.includes('wikipedia.org') ||
@@ -180,28 +190,23 @@ export function scoreSearchResult(item, context = {}) {
     negativeSignals.push(`Blacklisted domain: ${domain}`);
   }
 
-  // Source-Specific Adjustments
-  if (sourceScope === 'reddit') {
-    // Reddit posts with supply-side self intro get penalized
-    if (/\b(for hire|hire me|my portfolio|available for freelance)\b/i.test(fullText)) {
-      score -= 50;
-      negativeSignals.push('Reddit supply-side freelancer self-pitch');
-    }
-  } else if (sourceScope === 'github') {
-    // Normal bug issues get penalized
-    if (/\b(issue #\d+|bug fix|pr #\d+|merge branch|lint failed)\b/i.test(fullText) && !/\b(bounty|paid|budget|\$)\b/i.test(fullText)) {
-      score -= 40;
-      negativeSignals.push('GitHub non-commercial codebase bug report');
-    }
-  }
-
   if (context.crossQueryBoost) {
     score += context.crossQueryBoost;
     positiveSignals.push(`Cross-query corroboration boost (+${context.crossQueryBoost})`);
   }
 
+  // 3. DYNAMIC DUAL-PATH QUALIFICATION EVALUATION
+  const hasBuyerNeed = buyerIntentRegex.test(fullText);
+  const hasITDeliverable = deliverableRegex.test(fullText);
+  const hasActionVerb = actionVerbRegex.test(fullText);
+  const hasSeverePenalty = score <= -40 || isBlacklisted;
+
   const threshold = Number(process.env.PRE_CRAWL_THRESHOLD) || 45;
-  const decision = score >= threshold ? 'accept' : 'reject';
+  const passesScore = score >= threshold;
+  // Path B (Strong Intent Override): Catches high-intent founders who omit budget upfront
+  const passesStrongIntentOverride = (hasBuyerNeed && hasITDeliverable && hasActionVerb && !hasSeverePenalty);
+
+  const decision = (passesScore || passesStrongIntentOverride) ? 'accept' : 'reject';
   let rejectionReason = null;
   if (decision === 'reject') {
     if (negativeSignals.length > 0) rejectionReason = negativeSignals[0];
@@ -210,7 +215,7 @@ export function scoreSearchResult(item, context = {}) {
 
   let candidateState = 'REJECT';
   if (score >= 70) candidateState = 'HIGH_CONFIDENCE_PROJECT';
-  else if (score >= 50) candidateState = 'PROJECT_CANDIDATE';
+  else if (score >= 50 || passesStrongIntentOverride) candidateState = 'PROJECT_CANDIDATE';
   else if (score >= 35) candidateState = 'REVIEW';
   else candidateState = 'REJECT';
 

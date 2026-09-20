@@ -59,6 +59,27 @@ async function runPhase5Tests() {
     assert(res.decision === 'reject', `Reject Case ${i + 1}: "${rejectCases[i].title}" -> score ${res.score} (${res.rejectionReason})`);
   }
 
+  // Dual-Path Override Test (Founders who omit budget upfront)
+  const noBudgetFounder = scoreSearchResult({
+    title: 'Looking to hire a dev team to build our SaaS MVP',
+    snippet: 'Need a software team to develop our customer portal and dashboard. DM me with portfolio.'
+  });
+  assert(noBudgetFounder.decision === 'accept', 'Dual-Path Override: No-budget founder post must pass pre-crawl');
+
+  // Negation Safeguard Test ("Not a salaried role")
+  const negatedRole = scoreSearchResult({
+    title: 'Not a salaried role - seeking agency to build custom CRM',
+    snippet: 'No full-time employees needed. Looking to outsource our web application development.'
+  });
+  assert(negatedRole.decision === 'accept', 'Negation Safeguard: "Not a salaried role" must not trigger employment penalty');
+
+  // HR Corporate Job Rejection Test
+  const hrCorporateJob = scoreSearchResult({
+    title: 'Senior Software Engineer - Full Time Position',
+    snippet: 'We offer healthcare, 401k, benefits include competitive compensation. Submit your application at our career page.'
+  });
+  assert(hrCorporateJob.decision === 'reject', 'HR Corporate Job: "benefits include / healthcare" must be rejected');
+
   // -------------------------------------------------------------
   // PART 2: Four Problematic Regression URLs Pre-Filter Verification
   // -------------------------------------------------------------
