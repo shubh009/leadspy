@@ -84,13 +84,14 @@ export async function saveMasterProjects(projects = []) {
             short_summary: p.short_summary,
             original_description: p.original_description,
             category: p.category || 'Web Development',
+            subcategory: p.subcategory || null,
             skills: p.skills || [],
             features: p.features || [],
             client_name: p.client_name || p.client_company || 'Direct Client',
             client_username: p.client_username || null,
-            client_email: p.client_email || null,
-            client_profile_url: p.client_profile_url || null,
-            client_contact_method: p.contact_type || p.client_contact_method || 'none',
+            client_email: p.client_email || (p.contact_value && p.contact_value.includes('@') ? p.contact_value : null),
+            client_profile_url: p.client_profile_url || (p.contact_value && /^https?:\/\//i.test(p.contact_value) ? p.contact_value : null) || p.client_company_url || null,
+            client_contact_method: p.contact_type || p.client_contact_method || (p.client_email || (p.contact_value && p.contact_value.includes('@')) ? 'email' : (p.client_profile_url || (p.contact_value && /^https?:\/\//i.test(p.contact_value)) ? 'public_profile_message' : 'none')),
             client_location: p.client_location || null,
             budget: p.budget || null,
             budget_min: p.budget_min || null,
@@ -101,6 +102,7 @@ export async function saveMasterProjects(projects = []) {
             relevance_score: p.relevance_score || 85,
             posted_at: p.posted_at || new Date().toISOString(),
             discovered_at: p.discovered_at || new Date().toISOString(),
+            last_seen_at: p.last_seen_at || new Date().toISOString(),
             status: 'active'
           });
         }
