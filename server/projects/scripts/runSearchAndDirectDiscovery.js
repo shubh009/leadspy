@@ -92,7 +92,7 @@ export function scoreSearchResult(item, context = {}) {
   }
 
   // 1.3 Project / Procurement Signal (+20)
-  const procurementRegex = /\b(request for proposal|rfp|scope of work|statement of work|fixed price|contract project|budget\s*[:=$]|project budget|send proposal|quotation)\b/i;
+  const procurementRegex = /\b(request for proposal|rfp|scope of work|statement of work|fixed price|contract project|budget\s*[:=$]|project budget|send proposal|quotation|paid contract|paid project|paid gig)\b/i;
   if (procurementRegex.test(fullText)) {
     score += 20;
     const m = fullText.match(procurementRegex);
@@ -123,7 +123,7 @@ export function scoreSearchResult(item, context = {}) {
   // 2. NEGATIVE SIGNALS (Context-Aware)
   // 2.1 Job / Employment Signal (-50)
   const isFeatureSalary = /salary\s*(calculation|module|component|system|slip)/i.test(fullText);
-  const employmentRegex = /\b(senior\s*(software|react|node|frontend|backend)\s*developer|sde\b|full[- ]?time (job|role|position|employee)|permanent (role|position)|annual ctc|ctc\s*[:=]|[\d.]+\s*lpa|job vacancy|job opening|notice period|submit resume|send your cv|join our team|401k|benefits package|\$\d+k salary|w2 role)\b/i;
+  const employmentRegex = /\b(senior\s*(software|react|node|frontend|backend)\s*developer|sde\b|full[- ]?time (job|role|position|employee)|permanent (role|position)|annual ctc|ctc\s*[:=]|[\d.]+\s*lpa|job vacancy|job opening|notice period|submit resume|send your cv|join our team|401k|benefits package|benefits include|years of experience required|apply at|\$\d+k salary|w2 role)\b/i;
   if (!isFeatureSalary && employmentRegex.test(fullText)) {
     score -= 50;
     negativeSignals.push('Employment/Salaried job signal');
