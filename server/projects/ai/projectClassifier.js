@@ -200,56 +200,131 @@ export class ProjectClassifier {
       };
     }
 
-    // 1. DETERMINISTIC HARD REJECTION PRE-CHECKS
-    // In hybrid and heuristic modes, deterministic hard gates run FIRST.
-    // Hard rejections (freelancer self-pitch, discussion, employment, marketing, product page)
-    // must NEVER be overridden by the LLM.
+    // 1. DETERMINISTIC HARD REJECTION PRE-CHECKS (Gates 1 - 7)
     const heuristicCheck = this.heuristicQualification(candidate);
-
-    if (this.classificationMode === CLASSIFICATION_MODE.HEURISTIC) {
-      const res = this.applyGate8Deduplication(candidate, heuristicCheck);
-      return this.applyGate9Confidence(candidate, res);
-    }
-
-    // If deterministic gates rejected the candidate, enforce immediate hard rejection
     if (heuristicCheck.qualification_status === 'rejected') {
       return heuristicCheck;
     }
 
-    // 2. Candidate passed deterministic hard gates. If LLM enabled, perform LLM semantic extraction & qualification
-    let result = null;
-    if ((this.classificationMode === CLASSIFICATION_MODE.HYBRID || this.classificationMode === CLASSIFICATION_MODE.LLM) && (this.geminiApiKey || this.apiKey)) {
-      try {
-        const llmResult = await this.callLLM(candidate);
-        if (llmResult && typeof llmResult.qualification_status === 'string') {
-          // If LLM rejects, we respect LLM rejection
-          if (llmResult.qualification_status === 'rejected') {
-            result = {
-              qualification_status: 'rejected',
-              rejection_reason: llmResult.rejection_reason || 'UNQUALIFIED',
-              rejection_gate: 'LLM_REJECTION',
-              evidence_summary: llmResult.evidence_summary || 'Rejected by LLM semantic evaluation',
-              is_client_side_project: false,
-              has_actionable_contact: false,
-              contact_type: 'none'
-            };
-          } else {
-            // LLM qualified it: verify it actually has actionable contact per deterministic contract
-            result = this.formatExtractedProject(candidate, llmResult, heuristicCheck);
-          }
+    // 2. GATE 8 DEDUPLICATION
+    const dedupedResult = this.applyGate8Deduplication(candidate, heuristicCheck);
+    if (dedupedResult.qualification_status === 'rejected') {
+      return dedupedResult;
+    }
+
+    // 3. GATE 9 CONFIDENCE EVALUATION
+    const qualifiedResult = this.applyGate9Confidence(candidate, dedupedResult);
+
+    // 4. POST-QUALIFICATION LLM SYNTHESIS & OUTREACH PITCH GENERATION
+    if (qualifiedResult.qualification_status === 'qualified') {
+      return await this.synthesizeQualifiedLead(candidate, qualifiedResult);
+    }
+
+    return qualifiedResult;
+  }
+
+  /**
+   * Post-Qualification LLM Synthesis & Outreach Pitch Generator
+   * Enriches qualified leads with executive summaries and personalized cold outreach pitches.
+   */
+  async synthesizeQualifiedLead(candidate, projectResult) {
+    if (!projectResult || projectResult.qualification_status !== 'qualified') {
+      return projectResult;
+    }
+
+    if (!this.geminiApiKey && !this.apiKey) {
+      projectResult.executive_summary = projectResult.short_summary || projectResult.title;
+      projectResult.outreach_pitch_draft = `Hi! I saw your project posting regarding "${projectResult.title}". Our engineering team specializes in ${projectResult.category || 'custom software development'} and we would love to assist you. Let's connect!`;
+      return projectResult;
+    }
+
+    const prompt = `
+You are an expert IT Lead Synthesis & Cold Outreach Assistant.
+Below is a QUALIFIED client-side IT project opportunity discovered from the web:
+
+Title: "${projectResult.title || candidate.title}"
+Category: "${projectResult.category || 'Web Development'}"
+Source: "${projectResult.source}"
+URL: "${projectResult.sourceUrl}"
+Content:
+"""
+${candidate.rawContent || candidate.snippet || projectResult.short_summary || ''}
+"""
+
+Generate a structured JSON response (NO MARKDOWN, NO BACKTICKS) with:
+1. "executive_summary": A concise 1-2 sentence executive summary of what deliverable the client needs.
+2. "skills": An array of technical skills/stacks required (e.g. ["React", "Node.js"]).
+3. "outreach_pitch_draft": A short, highly persuasive, professional 3-sentence cold outreach proposal email/DM pitch to send to this client to pitch our agency's services.
+
+Schema:
+{
+  "executive_summary": "string",
+  "skills": ["string"],
+  "outreach_pitch_draft": "string"
+}
+`;
+
+    try {
+      let llmData = null;
+      if (this.geminiApiKey) {
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${this.geminiModel}:generateContent?key=${this.geminiApiKey}`;
+        const res = await fetch(geminiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.2, maxOutputTokens: 500, responseMimeType: 'application/json' }
+          }),
+          signal: AbortSignal.timeout(8000)
+        });
+        if (res.ok) {
+          const gData = await res.json();
+          let rawText = gData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          rawText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+          if (rawText) llmData = JSON.parse(rawText);
         }
-      } catch (err) {
-        console.warn('[ProjectClassifier] LLM qualification failed, using strict heuristic fallback:', err.message);
       }
+
+      if (!llmData && this.apiKey) {
+        const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: this.model,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.2,
+            max_tokens: 500
+          }),
+          signal: AbortSignal.timeout(8000)
+        });
+        if (res.ok) {
+          const orData = await res.json();
+          const text = orData.choices?.[0]?.message?.content || '';
+          const jsonMatch = text.match(/\{[\s\S]*\}/);
+          if (jsonMatch) llmData = JSON.parse(jsonMatch[0]);
+        }
+      }
+
+      if (llmData) {
+        if (llmData.executive_summary) projectResult.executive_summary = llmData.executive_summary;
+        if (Array.isArray(llmData.skills) && llmData.skills.length > 0) projectResult.skills = llmData.skills;
+        if (llmData.outreach_pitch_draft) projectResult.outreach_pitch_draft = llmData.outreach_pitch_draft;
+      }
+    } catch (err) {
+      console.warn('[ProjectClassifier] LLM synthesis fallback engaged:', err.message);
     }
 
-    // 3. Fallback to deterministic heuristic check if LLM was unavailable or failed
-    if (!result) {
-      result = heuristicCheck;
+    if (!projectResult.executive_summary) {
+      projectResult.executive_summary = projectResult.short_summary || projectResult.title;
+    }
+    if (!projectResult.outreach_pitch_draft) {
+      projectResult.outreach_pitch_draft = `Hi! I saw your requirement regarding "${projectResult.title}". Our engineering team specializes in ${projectResult.category || 'custom software development'} and we have built similar solutions. Let's discuss your timeline and scope!`;
     }
 
-    const dedupedResult = this.applyGate8Deduplication(candidate, result);
-    return this.applyGate9Confidence(candidate, dedupedResult);
+    return projectResult;
   }
 
   applyGate9Confidence(candidate, result) {
