@@ -354,3 +354,169 @@ export function applySiteFilter(queryStr, domain) {
   const cleanQuery = queryStr.replace(/^["']|["']$/g, '').trim();
   return `site:${cleanDomain} "${cleanQuery}"`;
 }
+
+// -------------------------------------------------------------
+// STEP-1 V2: CONTROLLED COMBINATORIAL QUERY MATRIX & FOOTPRINTS
+// -------------------------------------------------------------
+export const NEGATIVE_SEARCH_OPERATORS = '-job -jobs -career -careers -salary -resume -internship -recruiter -recruitment';
+
+export const COMBINATORIAL_DIMENSIONS = {
+  BUYER_INTENTS: [
+    'looking for developer',
+    'need development team',
+    'seeking technical partner',
+    'outsourcing development',
+    'looking for software team',
+    'need help building'
+  ],
+  PROJECT_STAGES: [
+    'MVP',
+    'prototype',
+    'new product',
+    'internal tool',
+    'v1',
+    'migration',
+    'redesign',
+    'automation'
+  ],
+  DELIVERABLES: [
+    'SaaS',
+    'mobile app',
+    'web application',
+    'CRM',
+    'ERP',
+    'dashboard',
+    'customer portal',
+    'API integration',
+    'ecommerce platform',
+    'workflow automation',
+    'AI application',
+    'voice agent'
+  ],
+  BUSINESS_CONTEXTS: [
+    'for our business',
+    'for our startup',
+    'for internal use',
+    'for customers',
+    'for our company'
+  ]
+};
+
+export const CONTROLLED_QUERY_TEMPLATES = [
+  // 1. Primary Buyer Need (Quoted intent + open terms + negative operators)
+  (intent, stage, deliv, ctx) => `"${intent}" ${deliv} ${ctx} ${NEGATIVE_SEARCH_OPERATORS}`,
+  // 2. Stage + Deliverable
+  (intent, stage, deliv, ctx) => `"${intent}" ${stage} ${deliv} ${NEGATIVE_SEARCH_OPERATORS}`,
+  // 3. Reddit Platform Footprints
+  (intent, stage, deliv, ctx) => `site:reddit.com/r/forhire "[Hiring]" ${deliv}`,
+  (intent, stage, deliv, ctx) => `site:reddit.com/r/freelance_forhire "[Hiring]" ${deliv}`,
+  // 4. Hacker News Footprint
+  (intent, stage, deliv, ctx) => `site:news.ycombinator.com "SEEKING FREELANCER" ${deliv}`,
+  // 5. RFP / Procurement Footprint
+  (intent, stage, deliv, ctx) => `filetype:pdf "request for proposal" "${deliv}" 2026`,
+  // 6. Exploratory Query (15% allocation)
+  (intent, stage, deliv, ctx) => `"${intent}" ${deliv} ${NEGATIVE_SEARCH_OPERATORS}`
+];
+
+/**
+ * Deterministically generates a controlled set of 20 queries for a cycle
+ * - 12 Targeted Combinatorial Queries
+ * - 5 Platform Footprints
+ * - 3 Exploratory Queries
+ */
+export function generateControlledCombinatorialQueries({ cycle = 1, batchSize = 20 } = {}) {
+  const queries = [];
+  const { BUYER_INTENTS, PROJECT_STAGES, DELIVERABLES, BUSINESS_CONTEXTS } = COMBINATORIAL_DIMENSIONS;
+
+  const cycleOffset = (cycle - 1) * 3;
+
+  // 1. 12 Targeted Combinatorial Queries
+  for (let i = 0; i < 12; i++) {
+    const intent = BUYER_INTENTS[(i + cycleOffset) % BUYER_INTENTS.length];
+    const stage = PROJECT_STAGES[(i + cycleOffset) % PROJECT_STAGES.length];
+    const deliv = DELIVERABLES[(i + cycleOffset) % DELIVERABLES.length];
+    const ctx = BUSINESS_CONTEXTS[(i + cycleOffset) % BUSINESS_CONTEXTS.length];
+
+    const qStr = (i % 2 === 0)
+      ? `"${intent}" ${deliv} ${ctx} ${NEGATIVE_SEARCH_OPERATORS}`
+      : `"${intent}" ${stage} ${deliv} ${NEGATIVE_SEARCH_OPERATORS}`;
+
+    queries.push(createQuery(qStr, {
+      priority: QUERY_PRIORITY.HIGH,
+      intentType: 'buyer_request',
+      deliverableType: deliv.toLowerCase().replace(/\s+/g, '_'),
+      sourceScope: 'public_web',
+      qualityTier: 'A',
+      category: 'combinatorial_targeted'
+    }));
+  }
+
+  // 2. 5 Platform Footprints (Reddit, HN, RFP)
+  const fpDelivs = [
+    DELIVERABLES[(cycleOffset) % DELIVERABLES.length],
+    DELIVERABLES[(cycleOffset + 1) % DELIVERABLES.length],
+    DELIVERABLES[(cycleOffset + 2) % DELIVERABLES.length]
+  ];
+
+  queries.push(createQuery(`site:reddit.com/r/forhire "[Hiring]" ${fpDelivs[0]}`, {
+    priority: QUERY_PRIORITY.HIGH,
+    intentType: 'buyer_request',
+    deliverableType: fpDelivs[0].toLowerCase().replace(/\s+/g, '_'),
+    sourceScope: 'reddit',
+    qualityTier: 'A',
+    category: 'footprint_reddit'
+  }));
+
+  queries.push(createQuery(`site:reddit.com/r/freelance_forhire "[Hiring]" ${fpDelivs[1]}`, {
+    priority: QUERY_PRIORITY.HIGH,
+    intentType: 'buyer_request',
+    deliverableType: fpDelivs[1].toLowerCase().replace(/\s+/g, '_'),
+    sourceScope: 'reddit',
+    qualityTier: 'A',
+    category: 'footprint_reddit'
+  }));
+
+  queries.push(createQuery(`site:news.ycombinator.com "SEEKING FREELANCER" ${fpDelivs[0]}`, {
+    priority: QUERY_PRIORITY.HIGH,
+    intentType: 'buyer_request',
+    deliverableType: fpDelivs[0].toLowerCase().replace(/\s+/g, '_'),
+    sourceScope: 'hackernews',
+    qualityTier: 'A',
+    category: 'footprint_hackernews'
+  }));
+
+  queries.push(createQuery(`filetype:pdf "request for proposal" "${fpDelivs[2]}" 2026`, {
+    priority: QUERY_PRIORITY.HIGH,
+    intentType: 'rfp',
+    deliverableType: fpDelivs[2].toLowerCase().replace(/\s+/g, '_'),
+    sourceScope: 'public_web',
+    qualityTier: 'A',
+    category: 'footprint_rfp'
+  }));
+
+  queries.push(createQuery(`site:reddit.com/r/forhire "[Hiring]" MVP OR "custom software"`, {
+    priority: QUERY_PRIORITY.HIGH,
+    intentType: 'buyer_request',
+    deliverableType: 'saas_mvp',
+    sourceScope: 'reddit',
+    qualityTier: 'A',
+    category: 'footprint_reddit'
+  }));
+
+  // 3. 3 Exploratory Queries (15% allocation)
+  for (let i = 0; i < 3; i++) {
+    const intent = BUYER_INTENTS[(i + cycleOffset + 4) % BUYER_INTENTS.length];
+    const deliv = DELIVERABLES[(i + cycleOffset + 6) % DELIVERABLES.length];
+    queries.push(createQuery(`"${intent}" ${deliv} ${NEGATIVE_SEARCH_OPERATORS}`, {
+      priority: QUERY_PRIORITY.MEDIUM,
+      intentType: 'buyer_request',
+      deliverableType: deliv.toLowerCase().replace(/\s+/g, '_'),
+      sourceScope: 'public_web',
+      qualityTier: 'B',
+      category: 'exploratory'
+    }));
+  }
+
+  return queries.slice(0, batchSize);
+}
+

@@ -15,7 +15,8 @@ import {
   highIntentProjectQueries,
   composeDynamicQueries, 
   applySiteFilter,
-  TARGET_PLATFORM_DOMAINS 
+  TARGET_PLATFORM_DOMAINS,
+  generateControlledCombinatorialQueries
 } from '../config/projectQueryLibrary.js';
 
 // Global query performance telemetry store
@@ -83,6 +84,36 @@ export class QueryRotatorService {
   }
 
   /**
+   * Computes normalized source allocation weights with Bayesian smoothing and 15% exploration floor
+   * @param {Object} sourceMetrics - { [source]: { actionableProjects, processed } }
+   * @returns {Object} { [source]: normalizedWeight }
+   */
+  static computeSourceAllocation(sourceMetrics = {}) {
+    const defaultSources = ['reddit', 'hackernews', 'public_web'];
+    const alpha = 1;
+    const beta = 10;
+    const rawScores = {};
+    let totalScore = 0;
+
+    for (const src of defaultSources) {
+      const stats = sourceMetrics[src] || { actionableProjects: 0, processed: 0 };
+      // Laplace / Bayesian smoothed yield
+      const smoothedYield = (stats.actionableProjects + alpha) / (stats.processed + beta);
+      // Floor at 0.15 exploration budget
+      const floored = Math.max(0.15, Math.min(0.60, smoothedYield * 3));
+      rawScores[src] = floored;
+      totalScore += floored;
+    }
+
+    // Normalize so sum equals exactly 1.0 (100%)
+    const normalized = {};
+    for (const src of defaultSources) {
+      normalized[src] = Number((rawScores[src] / totalScore).toFixed(3));
+    }
+    return normalized;
+  }
+
+  /**
    * Balanced query selection preventing category monopolization
    * Preserves extended metadata on every query object.
    */
@@ -91,6 +122,11 @@ export class QueryRotatorService {
     const batchSize = options.batchSize || 20;
     const cycleNum = options.cycle || 1;
     const mode = options.mode || DISCOVERY_MODE.STANDARD;
+
+    // STEP-1 V2: Controlled Combinatorial Queries with platform footprints
+    if (options.useCombinatorial !== false && !options.categories && !options.siteFilter && mode !== DISCOVERY_MODE.HIGH_INTENT) {
+      return generateControlledCombinatorialQueries({ cycle: cycleNum, batchSize });
+    }
 
     const candidateQueries = [];
 

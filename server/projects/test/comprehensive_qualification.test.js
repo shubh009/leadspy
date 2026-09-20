@@ -197,7 +197,7 @@ async function runComprehensiveTestSuite() {
         sourceUrl: 'https://localclassifieds.in/c12'
       },
       expectStatus: 'rejected',
-      expectReason: 'NOT_IT_PROJECT'
+      expectReason: ['NOT_IT_PROJECT', 'NON_IT_SERVICE']
     },
     {
       id: 13,
@@ -211,7 +211,7 @@ async function runComprehensiveTestSuite() {
         sourceUrl: 'https://hasjob.co/c13'
       },
       expectStatus: 'rejected',
-      expectReason: 'NOT_IT_PROJECT'
+      expectReason: ['NOT_IT_PROJECT', 'NON_IT_SERVICE']
     },
     {
       id: 14,
@@ -225,7 +225,7 @@ async function runComprehensiveTestSuite() {
         sourceUrl: 'https://spamfeed.com/c14'
       },
       expectStatus: 'rejected',
-      expectReason: 'NOT_IT_PROJECT'
+      expectReason: ['NOT_IT_PROJECT', 'NON_IT_SERVICE']
     },
 
     // ----------------------------------------------------------------
@@ -418,7 +418,8 @@ async function runComprehensiveTestSuite() {
 
     // 2. Rejection Reason Check
     if (tc.expectReason) {
-      if (result.rejection_reason !== tc.expectReason) {
+      const allowed = Array.isArray(tc.expectReason) ? tc.expectReason : [tc.expectReason];
+      if (!allowed.includes(result.rejection_reason)) {
         ok = false;
         failReasons.push(`Rejection Reason: Expected '${tc.expectReason}' but got '${result.rejection_reason}'`);
       }

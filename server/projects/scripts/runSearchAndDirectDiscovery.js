@@ -23,6 +23,30 @@ import { ContentExtractor } from '../services/contentExtractor.js';
 import { ProjectClassifier } from '../ai/projectClassifier.js';
 import { CanonicalDeduplicator } from '../services/canonicalDeduplicator.js';
 import { saveMasterProjects } from '../services/projectDbService.js';
+import { evaluateCandidateValidityGate, LINK_HEALTH_STATUS, PAGE_TYPE } from '../services/pageVerificationService.js';
+
+function getCandidateRootDomain(urlStr) {
+  try {
+    const parsed = new URL(urlStr);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    const parts = host.split('.');
+    if (parts.length >= 2) {
+      return parts.slice(-2).join('.');
+    }
+    return host;
+  } catch (e) {
+    return 'unknown';
+  }
+}
+
+function getRedditSubreddit(urlStr) {
+  try {
+    const match = urlStr.match(/reddit\.com\/r\/([^/?#]+)/i);
+    return match ? match[1].toLowerCase() : 'all';
+  } catch (e) {
+    return 'all';
+  }
+}
 
 /**
  * Deterministic, Source-Aware Pre-Crawl Scoring Function
@@ -163,6 +187,11 @@ export function scoreSearchResult(item, context = {}) {
     }
   }
 
+  if (context.crossQueryBoost) {
+    score += context.crossQueryBoost;
+    positiveSignals.push(`Cross-query corroboration boost (+${context.crossQueryBoost})`);
+  }
+
   const threshold = Number(process.env.PRE_CRAWL_THRESHOLD) || 45;
   const decision = score >= threshold ? 'accept' : 'reject';
   let rejectionReason = null;
@@ -171,9 +200,16 @@ export function scoreSearchResult(item, context = {}) {
     else rejectionReason = 'INSUFFICIENT_BUYER_INTENT_OR_DELIVERABLE';
   }
 
+  let candidateState = 'REJECT';
+  if (score >= 70) candidateState = 'HIGH_CONFIDENCE_PROJECT';
+  else if (score >= 50) candidateState = 'PROJECT_CANDIDATE';
+  else if (score >= 35) candidateState = 'REVIEW';
+  else candidateState = 'REJECT';
+
   return {
     score,
     decision,
+    candidateState,
     positiveSignals,
     negativeSignals,
     sourceScope,
@@ -439,28 +475,108 @@ export async function runFullDiscoveryPipeline(config = {}) {
   }
 
   // -------------------------------------------------------------
-  // 5. SOURCE-AWARE CHEAP PRE-CRAWL FILTER (Phase 4)
-  // Evaluates every candidate deterministically with zero network cost
+  // 5. LINK HEALTH + PAGE VALIDITY VERIFICATION (Mandatory Gate)
   // -------------------------------------------------------------
-  console.log(`\n🛡️ Running Source-Aware Pre-Crawl Filter on ${rawCandidatePool.length} pre-deduplicated candidates...`);
+  console.log(`\n🛡️ Running Link Health & Page Validity Gate on ${rawCandidatePool.length} unique candidates...`);
 
-  // Group candidates by search query to enforce maxCrawlsPerQuery
-  const queryCandidatesMap = new Map();
+  let linkHealthPassed = 0;
+  let linkHealthFailed = 0;
+  let pageValidityPassed = 0;
+  let pageValidityFailed = 0;
+  const verificationRejections = {};
+  const verifiedCandidatePool = [];
+
+  async function verifyCandidatePool(candidates, concurrency = 6) {
+    const results = new Array(candidates.length);
+    let index = 0;
+    async function worker() {
+      while (index < candidates.length) {
+        const i = index++;
+        try {
+          results[i] = await evaluateCandidateValidityGate(candidates[i]);
+        } catch (err) {
+          results[i] = {
+            pass: false,
+            rejection_stage: 'LINK_HEALTH',
+            rejection_reason: 'VERIFICATION_EXCEPTION'
+          };
+        }
+      }
+    }
+    const workers = Array.from({ length: Math.min(concurrency, candidates.length) }, () => worker());
+    await Promise.all(workers);
+    return results;
+  }
+
+  const gateResults = await verifyCandidatePool(rawCandidatePool, 6);
+
+  for (let i = 0; i < rawCandidatePool.length; i++) {
+    const item = rawCandidatePool[i];
+    const gateRes = gateResults[i];
+    const stat = queryStatsMap.get(item.search_query);
+
+    if (gateRes && gateRes.pass) {
+      linkHealthPassed++;
+      pageValidityPassed++;
+      verifiedCandidatePool.push({
+        ...item,
+        final_url: gateRes.candidate.final_url || item.url,
+        link_health_status: gateRes.candidate.link_health_status,
+        page_type: gateRes.candidate.page_type,
+        verificationGate: gateRes
+      });
+    } else {
+      const stage = gateRes?.rejection_stage || 'LINK_HEALTH';
+      const reason = gateRes?.rejection_reason || 'UNREACHABLE';
+      if (stage === 'LINK_HEALTH') linkHealthFailed++;
+      else pageValidityFailed++;
+
+      verificationRejections[reason] = (verificationRejections[reason] || 0) + 1;
+      if (stat) {
+        stat.preFilterRejected++;
+        stat.rejectionReasons[reason] = (stat.rejectionReasons[reason] || 0) + 1;
+      }
+    }
+  }
+
+  console.log(`   -> Link Health: ${linkHealthPassed} Passed | ${linkHealthFailed} Failed`);
+  console.log(`   -> Page Validity: ${pageValidityPassed} Passed | ${pageValidityFailed} Failed`);
+  console.log(`   -> Candidates Surviving Verification Gate: ${verifiedCandidatePool.length}`);
+
+  // -------------------------------------------------------------
+  // 6. PROJECT INTENT SCORING & CANDIDATE STATE ASSIGNMENT
+  // -------------------------------------------------------------
+  console.log(`\n🧠 Scoring Project Intent on ${verifiedCandidatePool.length} verified candidates...`);
+  const candidateStateCounts = {
+    HIGH_CONFIDENCE_PROJECT: 0,
+    PROJECT_CANDIDATE: 0,
+    REVIEW: 0,
+    REJECT: 0
+  };
   let totalPreFilterAccepted = 0;
   let totalPreFilterRejected = 0;
+  const scoredCandidates = [];
 
-  for (const item of rawCandidatePool) {
-    const qKey = item.search_query || 'direct_source';
-    if (!queryCandidatesMap.has(qKey)) queryCandidatesMap.set(qKey, []);
+  for (const item of verifiedCandidatePool) {
+    const meta = canonicalDeduplicator.getCandidateMetadata(item.canonicalUrl || item.url);
+    let crossQueryBoost = 0;
+    if (meta) {
+      if (meta.query_count > 1) crossQueryBoost += 5;
+      if (meta.distinct_clusters_count > 1) crossQueryBoost += 5;
+      if (meta.best_rank <= 3) crossQueryBoost += 5;
+    }
 
-    const evalResult = scoreSearchResult(item, item.queryContext);
+    const evalResult = scoreSearchResult(item, { ...item.queryContext, crossQueryBoost });
     item.preCrawlEval = evalResult;
+    item.candidateState = evalResult.candidateState;
+
+    candidateStateCounts[evalResult.candidateState] = (candidateStateCounts[evalResult.candidateState] || 0) + 1;
 
     const stat = queryStatsMap.get(item.search_query);
     if (evalResult.decision === 'accept') {
       totalPreFilterAccepted++;
       if (stat) stat.preFilterAccepted++;
-      queryCandidatesMap.get(qKey).push(item);
+      scoredCandidates.push(item);
     } else {
       totalPreFilterRejected++;
       if (stat) {
@@ -471,20 +587,54 @@ export async function runFullDiscoveryPipeline(config = {}) {
     }
   }
 
-  // Sort each query group by score descending and take up to maxCrawlsPerQuery
+  console.log(`   -> Pre-Filter Accepted: ${totalPreFilterAccepted} | Pre-Filter Rejected: ${totalPreFilterRejected}`);
+  console.log(`   -> Candidate States: HIGH_CONFIDENCE: ${candidateStateCounts.HIGH_CONFIDENCE_PROJECT} | CANDIDATE: ${candidateStateCounts.PROJECT_CANDIDATE} | REVIEW: ${candidateStateCounts.REVIEW} | REJECT: ${candidateStateCounts.REJECT}`);
+
+  // -------------------------------------------------------------
+  // 7. GLOBAL CANDIDATE RANKING & DIVERSITY BUDGET ALLOCATION
+  // -------------------------------------------------------------
+  console.log(`\n📊 Global Candidate Ranking across all queries...`);
+
+  // Sort globally by intent score descending
+  scoredCandidates.sort((a, b) => b.preCrawlEval.score - a.preCrawlEval.score);
+
   const approvedForCrawl = [];
-  for (const [qKey, candidates] of queryCandidatesMap.entries()) {
-    candidates.sort((a, b) => b.preCrawlEval.score - a.preCrawlEval.score);
-    const allowed = candidates.slice(0, maxCrawlsPerQuery);
-    for (const c of allowed) {
-      if (approvedForCrawl.length < maxTotalCrawlsPerRun) {
-        approvedForCrawl.push(c);
-      }
+  const domainCounts = {};
+  const redditSubredditCounts = {};
+  let hnCount = 0;
+  let ghCount = 0;
+
+  for (const candidate of scoredCandidates) {
+    if (approvedForCrawl.length >= maxTotalCrawlsPerRun) break;
+
+    const url = candidate.final_url || candidate.url;
+    const domain = getCandidateRootDomain(url);
+    const source = candidate.sourceScope || candidate.source || 'public_web';
+
+    // Source-native platforms have community/platform-aware caps instead of root-domain cap (Amendment 3)
+    if (source === 'reddit' || domain === 'reddit.com') {
+      const sub = getRedditSubreddit(url);
+      const subCount = redditSubredditCounts[sub] || 0;
+      const totalReddit = Object.values(redditSubredditCounts).reduce((a, b) => a + b, 0);
+      if (subCount >= 5 || totalReddit >= 12) continue; // community cap
+      redditSubredditCounts[sub] = subCount + 1;
+    } else if (source === 'hackernews' || domain === 'ycombinator.com') {
+      if (hnCount >= 10) continue;
+      hnCount++;
+    } else if (source === 'github' || domain === 'github.com') {
+      if (ghCount >= 8) continue;
+      ghCount++;
+    } else {
+      // General web: enforce max 3 per root domain
+      const domCount = domainCounts[domain] || 0;
+      if (domCount >= 3) continue;
+      domainCounts[domain] = domCount + 1;
     }
+
+    approvedForCrawl.push(candidate);
   }
 
-  console.log(`   -> Pre-Filter Accepted: ${totalPreFilterAccepted} | Pre-Filter Rejected: ${totalPreFilterRejected}`);
-  console.log(`   -> Promising Candidates Scheduled for Deep Crawl: ${approvedForCrawl.length} (Cap: ${maxTotalCrawlsPerRun})`);
+  console.log(`   -> Promising Candidates Scheduled for Deep Crawl: ${approvedForCrawl.length} (Global Cap: ${maxTotalCrawlsPerRun})`);
 
   // -------------------------------------------------------------
   // 6. SELECTIVE DEEP CRAWL & CONTENT FINGERPRINT DEDUPLICATION
@@ -570,6 +720,9 @@ export async function runFullDiscoveryPipeline(config = {}) {
   console.log(`📊 COMPLETE RETRIEVAL FUNNEL & EFFICIENCY METRICS [MODE: ${mode.toUpperCase()}]:`);
   console.log(`   Raw Search Results               : ${dedupMetrics.rawResults}`);
   console.log(`   Unique Search Results            : ${totalEvaluated}`);
+  console.log(`   Link Health Passed / Failed      : ${linkHealthPassed} / ${linkHealthFailed}`);
+  console.log(`   Page Validity Passed / Failed    : ${pageValidityPassed} / ${pageValidityFailed}`);
+  console.log(`   Candidate State Breakdown        :`, candidateStateCounts);
   console.log(`   Pre-Filter Accepted              : ${totalPreFilterAccepted}`);
   console.log(`   Pre-Filter Rejected (Zero Crawl) : ${totalPreFilterRejected}`);
   console.log(`   Deep Crawled (Promising URLs)    : ${approvedForCrawl.length}`);
@@ -580,6 +733,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
   console.log(`   Contactable Leads Verified       : ${qualifiedProjects.filter(p => p.has_actionable_contact).length}`);
   console.log(`   Diagnostic Crawl Reduction Rate  : ${crawlReductionRate}`);
   console.log(`   Rejection Breakdown              :`, rejectionReasons);
+  console.log(`   Verification Rejections          :`, verificationRejections);
   console.log(`   Provider Status                  :`, providerStatus);
   console.log('================================================================\n');
 
@@ -623,6 +777,11 @@ export async function runFullDiscoveryPipeline(config = {}) {
     metrics: {
       rawResults: dedupMetrics.rawResults,
       uniqueResults: totalEvaluated,
+      linkHealthPassed,
+      linkHealthFailed,
+      pageValidityPassed,
+      pageValidityFailed,
+      candidateStates: candidateStateCounts,
       preFilterAccepted: totalPreFilterAccepted,
       preFilterRejected: totalPreFilterRejected,
       deepCrawled: approvedForCrawl.length,
@@ -635,6 +794,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
       crawlReductionRate
     },
     rejectionReasons,
+    verificationRejections,
     providerStatus,
     queryBreakdown
   };
