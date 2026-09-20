@@ -16,6 +16,9 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+import fs from 'fs';
+import path from 'path';
+
 import { QueryRotatorService, ROTATION_CYCLES } from '../services/queryRotatorService.js';
 import { DISCOVERY_MODE } from '../config/projectQueryLibrary.js';
 import { MultiSearchManager } from '../sources/searchProvider.js';
@@ -31,6 +34,109 @@ import {
   LINK_HEALTH_STATUS,
   PAGE_TYPE
 } from '../services/pageVerificationService.js';
+
+export function exportFunnelAuditCSVs({ rawCandidatePool = [], droppedCandidates = [], highIntentApprovedCandidates = [], qualifiedProjects = [] }) {
+  const exportDirs = [
+    process.cwd(),
+    '/Users/shubh/Downloads/leadspy_search_engine_files'
+  ];
+
+  for (const dir of exportDirs) {
+    if (!fs.existsSync(dir)) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+      } catch (e) {}
+    }
+  }
+
+  function escapeCsvCell(val) {
+    if (val === null || val === undefined) return '""';
+    const str = String(val).replace(/"/g, '""');
+    return `"${str}"`;
+  }
+
+  // 1. Raw SERP Links
+  const csv1Headers = ['search_query', 'source', 'url', 'title', 'snippet', 'discovered_at'];
+  const csv1Rows = [csv1Headers.join(',')];
+  for (const item of rawCandidatePool) {
+    csv1Rows.push([
+      escapeCsvCell(item.search_query),
+      escapeCsvCell(item.source),
+      escapeCsvCell(item.url),
+      escapeCsvCell(item.title),
+      escapeCsvCell(item.snippet),
+      escapeCsvCell(item.discovered_at)
+    ].join(','));
+  }
+
+  // 2. In-Memory Dropped Links
+  const csv2Headers = ['search_query', 'source', 'url', 'title', 'score', 'candidate_state', 'rejection_reason', 'negative_signals'];
+  const csv2Rows = [csv2Headers.join(',')];
+  for (const item of droppedCandidates) {
+    csv2Rows.push([
+      escapeCsvCell(item.search_query),
+      escapeCsvCell(item.source),
+      escapeCsvCell(item.url),
+      escapeCsvCell(item.title),
+      escapeCsvCell(item.preCrawlEval?.score ?? 0),
+      escapeCsvCell(item.preCrawlEval?.candidateState ?? item.candidateState ?? 'REJECT'),
+      escapeCsvCell(item.preCrawlEval?.rejectionReason || 'LOW_SCORE'),
+      escapeCsvCell((item.preCrawlEval?.negativeSignals || []).join('; '))
+    ].join(','));
+  }
+
+  // 3. High-Intent Network Approved Links
+  const csv3Headers = ['search_query', 'source', 'url', 'title', 'score', 'candidate_state', 'link_health_status', 'page_validity_status'];
+  const csv3Rows = [csv3Headers.join(',')];
+  for (const item of highIntentApprovedCandidates) {
+    csv3Rows.push([
+      escapeCsvCell(item.search_query),
+      escapeCsvCell(item.source),
+      escapeCsvCell(item.url),
+      escapeCsvCell(item.title),
+      escapeCsvCell(item.preCrawlEval?.score ?? 0),
+      escapeCsvCell(item.candidateState ?? 'PROJECT_CANDIDATE'),
+      escapeCsvCell(item.linkHealthStatus || 'PASSED'),
+      escapeCsvCell(item.pageValidityStatus || 'PASSED')
+    ].join(','));
+  }
+
+  // 4. Valid Accessible Project Pages / Qualified Leads
+  const csv4Headers = ['id', 'project_title', 'client_company', 'canonical_url', 'qualification_score', 'key_requirements', 'estimated_budget', 'contact_channel', 'outreach_pitch'];
+  const csv4Rows = [csv4Headers.join(',')];
+  for (const item of qualifiedProjects) {
+    csv4Rows.push([
+      escapeCsvCell(item.id || item.canonicalId),
+      escapeCsvCell(item.project_title || item.title),
+      escapeCsvCell(item.client_company || item.company_name),
+      escapeCsvCell(item.canonical_url || item.canonicalUrl || item.url),
+      escapeCsvCell(item.qualification_score ?? item.score),
+      escapeCsvCell(Array.isArray(item.key_requirements) ? item.key_requirements.join('; ') : item.key_requirements),
+      escapeCsvCell(item.estimated_budget || item.budget_range),
+      escapeCsvCell(item.contact_channel || item.contact_email || item.contact_url),
+      escapeCsvCell(item.outreach_pitch || item.outreachPitchDraft)
+    ].join(','));
+  }
+
+  const files = [
+    { name: 'csv1_raw_serp_links.csv', content: csv1Rows.join('\n') },
+    { name: 'csv2_in_memory_dropped_links.csv', content: csv2Rows.join('\n') },
+    { name: 'csv3_high_intent_network_approved_links.csv', content: csv3Rows.join('\n') },
+    { name: 'csv4_valid_accessible_project_pages.csv', content: csv4Rows.join('\n') }
+  ];
+
+  for (const file of files) {
+    for (const dir of exportDirs) {
+      const targetPath = path.join(dir, file.name);
+      try {
+        fs.writeFileSync(targetPath, file.content, 'utf8');
+        console.log(`📁 Audit CSV saved: ${targetPath}`);
+      } catch (err) {
+        console.warn(`⚠️ Failed writing audit CSV to ${targetPath}:`, err.message);
+      }
+    }
+  }
+}
 
 function getCandidateRootDomain(urlStr) {
   try {
@@ -449,7 +555,9 @@ export async function runFullDiscoveryPipeline(config = {}) {
     maxDays: days
   });
 
+  const maxRawLimit = config.maxRawLimit || 150;
   const rawCandidatePool = [];
+  const droppedCandidates = [];
   const queryStatsMap = new Map();
   const providerStatus = {
     hackernews: 'ACTIVE',
@@ -478,6 +586,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
   }
 
   function ingestCandidate(rawItem, queryContext = {}) {
+    if (rawCandidatePool.length >= maxRawLimit) return;
     trackFound(rawItem.search_query, rawItem.source);
 
     // Pre-Classification Canonical Deduplication
@@ -631,6 +740,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
   console.log(`📡 [Search Providers V2] Executing ${searchQueries.length} balanced queries with fallback chain...`);
 
   for (const item of searchQueries) {
+    if (rawCandidatePool.length >= maxRawLimit) break;
     const queryStr = item.query;
     try {
       const { provider, results, quality, fallbackOccurred } = await searchManager.searchWithFallback(queryStr, {
@@ -640,6 +750,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
       });
 
       for (const r of results) {
+        if (rawCandidatePool.length >= maxRawLimit) break;
         if (contentExtractor.isValidTarget(r.url)) {
           ingestCandidate({
             source: r.engine || provider || 'web_search',
@@ -704,6 +815,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
       scoredCandidates.push(item);
     } else {
       totalPreFilterRejected++;
+      droppedCandidates.push(item);
       if (stat) {
         stat.preFilterRejected++;
         const r = evalResult.rejectionReason || 'LOW_SCORE';
@@ -737,6 +849,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
     if (currentQueryCrawls >= maxCrawlsPerQuery) {
       crawlCapRejectedByQuery++;
       candidate.preCrawlEval.rejectionReason = 'QUERY_CRAWL_CAP_REACHED';
+      droppedCandidates.push(candidate);
       const stat = queryStatsMap.get(qStr);
       if (stat) {
         stat.rejectionReasons['QUERY_CRAWL_CAP_REACHED'] = (stat.rejectionReasons['QUERY_CRAWL_CAP_REACHED'] || 0) + 1;
@@ -748,6 +861,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
     if (!diversityBudget.canAccept(candidate)) {
       crawlCapRejectedByDiversity++;
       candidate.preCrawlEval.rejectionReason = 'DIVERSITY_CAP_REACHED';
+      droppedCandidates.push(candidate);
       continue;
     }
 
@@ -984,7 +1098,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
   console.log(`   Pre-Filter Accepted              : ${totalPreFilterAccepted}`);
   console.log(`   Pre-Filter Rejected (Zero Crawl) : ${totalPreFilterRejected}`);
   console.log(`   Crawl Cap Rejected (Per-Query)   : ${crawlCapRejectedByQuery}`);
-  console.log(`   Deep Crawled (Promising URLs)    : ${approvedForCrawl.length}`);
+  console.log(`   Deep Crawled (Promising URLs)    : ${verifiedCandidatePool.length}`);
   console.log(`   Extraction Failures              : ${extractionFailures}`);
   console.log(`   Candidates Entering Classifier   : ${enrichedCandidates.length}`);
   console.log(`   Gate 8 Semantic Duplicates       : ${gate8Duplicates}`);
@@ -1042,6 +1156,13 @@ export async function runFullDiscoveryPipeline(config = {}) {
     console.log(`🔍 [AUDIT RUN] Persistence disabled (persistToDb=${persistToDb}, auditOnly=${auditOnly}). Generated ${qualifiedProjects.length} qualified leads without modifying DB.`);
   }
 
+  exportFunnelAuditCSVs({
+    rawCandidatePool,
+    droppedCandidates,
+    highIntentApprovedCandidates: approvedForVerification,
+    qualifiedProjects
+  });
+
   return {
     mode,
     cycle,
@@ -1067,7 +1188,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
       preFilterAccepted: totalPreFilterAccepted,
       preFilterRejected: totalPreFilterRejected,
       crawlCapRejectedByQuery,
-      deepCrawled: approvedForCrawl.length,
+      deepCrawled: verifiedCandidatePool.length,
       extractionFailures,
       candidatesEnteringClassifier: enrichedCandidates.length,
       gate8Duplicates,
