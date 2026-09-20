@@ -815,7 +815,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
   console.log(`   Unique Search Results            : ${totalEvaluated}`);
   console.log(`   Link Health Checked / Passed     : ${linkHealthChecked} / ${linkHealthPassed} (Failed: ${linkHealthFailed})`);
   console.log(`   Page Validity Checked / Passed   : ${pageValidityChecked} / ${pageValidityPassed} (Failed: ${pageValidityFailed})`);
-  console.log(`   Verification Cache Hits / Misses : ${cacheStats.cacheHits} / ${cacheStats.cacheMisses}`);
+  console.log(`   Verification Cache Hits / Misses : ${verificationCacheHits} / ${verificationCacheMisses}`);
   console.log(`   Candidate State Breakdown        :`, candidateStateCounts);
   console.log(`   Pre-Filter Accepted              : ${totalPreFilterAccepted}`);
   console.log(`   Pre-Filter Rejected (Zero Crawl) : ${totalPreFilterRejected}`);
