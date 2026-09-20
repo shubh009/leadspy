@@ -30,6 +30,12 @@ import {
   generateControlledCombinatorialQueries
 } from '../config/projectQueryLibrary.js';
 
+import {
+  runPhaseDPilot,
+  resolvePhaseDPilotConfig,
+  shouldPersistDiscoveryLeads
+} from '../scripts/runSearchAndDirectDiscovery.js';
+
 beforeEach(() => {
   clearVerificationCache();
 });
@@ -293,6 +299,45 @@ test('🧪 Gap 1.10: Insufficient content (< 30 chars) rejected at PAGE_VALIDITY
   assert.equal(res.validityReport.page_validity_reason, 'INSUFFICIENT_CONTENT');
 });
 
+test('🧪 Gap 1.11: Misleading search snippet + failed page fetch = REJECT (Never fallback to snippet)', async () => {
+  // Mock fetch: link health HEAD passes HTTP 200, but page fetch fails (HTTP 500 error or empty)
+  const mockFetch = async (url, opts) => {
+    if (opts && opts.method === 'HEAD') {
+      return {
+        status: 200,
+        url,
+        headers: new Map([['content-type', 'text/html']])
+      };
+    }
+    // Page fetch GET fails
+    return {
+      status: 500,
+      url,
+      headers: new Map(),
+      text: async () => ''
+    };
+  };
+
+  const candidate = {
+    url: 'https://client-portal.com/rfp/urgent-software-project',
+    snippet: 'Looking for software development agency to build custom ERP SaaS portal. $50,000 budget. Immediate start.'
+  };
+
+  const res = await evaluateCandidateValidityGate(candidate, {
+    fetchFn: mockFetch,
+    fetchPageContent: true
+  });
+
+  assert.equal(res.pass, false, 'Candidate with failed page fetch must NOT pass using search snippet');
+  assert.equal(res.rejection_stage, 'PAGE_VALIDITY');
+  assert.equal(res.rejection_reason, 'PAGE_CONTENT_FETCH_FAILED');
+  assert.equal(res.validityReport.page_valid, false);
+  assert.equal(res.validityReport.evaluated, true, 'Page validity stage must be recorded as evaluated/attempted');
+  assert.equal(res.verificationTelemetry.pageFetchAttempted, true);
+  assert.equal(res.verificationTelemetry.pageFetchSucceeded, false);
+  assert.equal(res.verificationTelemetry.pageFetchFailed, true);
+});
+
 // =============================================================
 // GAP 2: VERIFICATION CACHE
 // =============================================================
@@ -375,6 +420,53 @@ test('🧪 Gap 2.3: clearVerificationCache resets cache completely for test isol
   assert.equal(getVerificationCacheStats().cacheMisses, 0);
 });
 
+test('🧪 Gap 2.4: Explicit verificationTelemetry is returned and cached verification never counts as page fetch attempt', async () => {
+  const htmlBody = '<html><body><h1>Project RFP</h1><p>We need an engineering partner to build our mobile application. budget $20,000</p></body></html>';
+  let networkFetchCount = 0;
+
+  const mockFetch = async (url) => {
+    networkFetchCount++;
+    return {
+      status: 200,
+      url,
+      headers: new Map([['content-type', 'text/html']]),
+      text: async () => htmlBody
+    };
+  };
+
+  const candidate = {
+    url: 'https://corp.com/rfp-2026',
+    snippet: 'Mobile app build'
+  };
+
+  // 1st call: Cache miss -> network fetch attempted
+  const res1 = await evaluateCandidateValidityGate(candidate, { fetchFn: mockFetch, fetchPageContent: true });
+  assert.equal(res1.pass, true);
+  assert.deepEqual(res1.verificationTelemetry, {
+    cacheHit: false,
+    linkHealthFetchAttempted: true,
+    pageFetchAttempted: true,
+    pageFetchSucceeded: true,
+    pageFetchFailed: false
+  });
+
+  // 2nd call with same canonical URL (with UTM tags) -> Cache hit
+  const candidateWithUtm = {
+    url: 'https://corp.com/rfp-2026?utm_source=twitter&utm_medium=social',
+    snippet: 'Mobile app build'
+  };
+  const res2 = await evaluateCandidateValidityGate(candidateWithUtm, { fetchFn: mockFetch, fetchPageContent: true });
+  assert.equal(res2.pass, true);
+  assert.equal(res2.fromCache, true);
+  assert.deepEqual(res2.verificationTelemetry, {
+    cacheHit: true,
+    linkHealthFetchAttempted: false,
+    pageFetchAttempted: false, // Cached verification must NOT count as a new page fetch attempt
+    pageFetchSucceeded: false,
+    pageFetchFailed: false
+  });
+});
+
 // =============================================================
 // GAP 3: SOURCE ALLOCATION INTEGRATION
 // =============================================================
@@ -454,4 +546,58 @@ test('🧪 Gap 4.1: Rotator cycle 1 produces zero duplicate queries and exactly 
   const queryStrings = queries.map(q => q.query);
   const uniqueStrings = new Set(queryStrings);
   assert.equal(uniqueStrings.size, 20, 'Zero duplicate queries allowed in 20-query batch');
+});
+
+test('🧪 Gap 4.2: runPhaseDPilot hard-locks cycle=1, batchSize=20, days=30, persistToDb=false, auditOnly=true against caller overrides', async () => {
+  // Test resolvePhaseDPilotConfig directly
+  const callerAttemptedOverrides = {
+    cycle: 99,
+    batchSize: 500,
+    days: 365,
+    persistToDb: true,
+    auditOnly: false
+  };
+
+  const locked = resolvePhaseDPilotConfig(callerAttemptedOverrides);
+  assert.equal(locked.cycle, 1, 'Phase D cycle must strictly be locked to 1');
+  assert.equal(locked.batchSize, 20, 'Phase D batchSize must strictly be locked to 20');
+  assert.equal(locked.days, 30, 'Phase D days must strictly be locked to 30');
+  assert.equal(locked.persistToDb, false, 'Phase D persistToDb must strictly be locked to false');
+  assert.equal(locked.auditOnly, true, 'Phase D auditOnly must strictly be locked to true');
+
+  // Test full runPhaseDPilot execution with dryRun=true (0 network calls, 0 DB writes)
+  const dryRunResult = await runPhaseDPilot({
+    dryRun: true,
+    cycle: 42,
+    batchSize: 100,
+    days: 90,
+    persistToDb: true,
+    auditOnly: false
+  });
+
+  assert.equal(dryRunResult.cycle, 1, 'runPhaseDPilot must execute with cycle=1');
+  assert.equal(dryRunResult.batchSize, 20, 'runPhaseDPilot must select exactly 20 queries');
+  assert.equal(dryRunResult.days, 30, 'runPhaseDPilot must execute with days=30');
+  assert.equal(dryRunResult.persistToDb, false, 'runPhaseDPilot must have persistToDb=false');
+  assert.equal(dryRunResult.auditOnly, true, 'runPhaseDPilot must have auditOnly=true');
+  assert.equal(dryRunResult.shouldPersist, false, 'DB write must be strictly disabled (shouldPersist=false)');
+  assert.equal(dryRunResult.queries.length, 20, 'Exactly 20 queries must be selected for Phase D');
+});
+
+test('🧪 Gap 4.3: auditOnly=true acts as a strict DB-write safety guard blocking persistence even when persistToDb=true', () => {
+  // 1. When auditOnly is true and persistToDb is true -> persistence must be BLOCKED
+  const blocked1 = shouldPersistDiscoveryLeads(true, true);
+  assert.equal(blocked1, false, 'auditOnly=true must override persistToDb=true to prevent DB writes');
+
+  // 2. When auditOnly is true and persistToDb is false -> persistence must be BLOCKED
+  const blocked2 = shouldPersistDiscoveryLeads(false, true);
+  assert.equal(blocked2, false, 'auditOnly=true must prevent DB writes');
+
+  // 3. When auditOnly is false and persistToDb is false -> persistence is false
+  const blocked3 = shouldPersistDiscoveryLeads(false, false);
+  assert.equal(blocked3, false, 'persistToDb=false prevents DB writes');
+
+  // 4. Persistence allowed ONLY when persistToDb=true AND auditOnly=false
+  const allowed = shouldPersistDiscoveryLeads(true, false);
+  assert.equal(allowed, true, 'DB writes allowed only when persistToDb=true and auditOnly=false');
 });

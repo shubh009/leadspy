@@ -409,6 +409,15 @@ export async function fetchLightweightPageContent(url, options = {}) {
       };
     }
 
+    if (res.status && res.status >= 400) {
+      return {
+        success: false,
+        content: '',
+        status: res.status,
+        error: `HTTP_${res.status}`
+      };
+    }
+
     // Read text content up to maxBytes
     let rawText = '';
     if (typeof res.text === 'function') {
@@ -421,13 +430,14 @@ export async function fetchLightweightPageContent(url, options = {}) {
       rawText = String(res.body);
     }
 
-    if (!rawText) {
+    if (!rawText || !rawText.trim()) {
       return {
         success: false,
         content: '',
         contentType,
         isPdf: false,
-        isShell: false
+        isShell: false,
+        error: 'EMPTY_BODY'
       };
     }
 
@@ -451,6 +461,17 @@ export async function fetchLightweightPageContent(url, options = {}) {
       .replace(/&#x27;/g, "'")
       .replace(/\s+/g, ' ')
       .trim();
+
+    if (!cleanText) {
+      return {
+        success: false,
+        content: '',
+        contentType,
+        isPdf: false,
+        isShell: false,
+        error: 'NO_READABLE_TEXT'
+      };
+    }
 
     return {
       success: true,
@@ -488,11 +509,19 @@ export async function evaluateCandidateValidityGate(candidate, options = {}) {
     return {
       ...cached,
       fromCache: true,
+      verificationTelemetry: {
+        cacheHit: true,
+        linkHealthFetchAttempted: false,
+        pageFetchAttempted: false,
+        pageFetchSucceeded: false,
+        pageFetchFailed: false
+      },
       candidate: {
         ...candidate,
-        final_url: cached.final_url,
-        link_health_status: cached.healthReport.health_status,
-        page_type: cached.validityReport.page_type
+        final_url: cached.candidate?.final_url || cached.final_url || (cached.healthReport && cached.healthReport.final_url) || url,
+        link_health_status: cached.healthReport?.health_status,
+        page_type: cached.validityReport?.page_type,
+        pageContentPreview: cached.candidate?.pageContentPreview || ''
       }
     };
   }
@@ -511,6 +540,13 @@ export async function evaluateCandidateValidityGate(candidate, options = {}) {
       rejection_reason: healthReport.health_status,
       healthReport,
       validityReport: { page_valid: false, page_type: PAGE_TYPE.ERROR_PAGE, evaluated: false },
+      verificationTelemetry: {
+        cacheHit: false,
+        linkHealthFetchAttempted: true,
+        pageFetchAttempted: false,
+        pageFetchSucceeded: false,
+        pageFetchFailed: false
+      },
       candidate
     };
     VERIFICATION_CACHE.set(canonicalUrl, verdict);
@@ -526,56 +562,145 @@ export async function evaluateCandidateValidityGate(candidate, options = {}) {
       rejection_reason: healthReport.health_status,
       healthReport,
       validityReport: { page_valid: false, page_type: PAGE_TYPE.ERROR_PAGE, evaluated: false },
+      verificationTelemetry: {
+        cacheHit: false,
+        linkHealthFetchAttempted: true,
+        pageFetchAttempted: false,
+        pageFetchSucceeded: false,
+        pageFetchFailed: false
+      },
       candidate
     };
     VERIFICATION_CACHE.set(canonicalUrl, verdict);
     return verdict;
   }
 
-  // Gate 2: GAP 1 — Real Page-Content Verification
+  // Gate 2: Real Page-Content Verification
   const finalUrl = healthReport.final_url || url;
   let pageContent = '';
 
   if (options.previewContent !== undefined) {
     pageContent = options.previewContent;
-  } else if (options.fetchFn && !options.fetchPageContent && candidate.snippet) {
-    // Hermetic link-health unit tests that mock fetchFn without page body
-    pageContent = candidate.snippet || candidate.content || candidate.title || '';
-  } else {
-    // Production & real page verification: fetch actual lightweight content from finalUrl
-    const fetchResult = await fetchLightweightPageContent(finalUrl, options);
-    if (fetchResult.success && fetchResult.content) {
-      pageContent = fetchResult.content;
-      if (fetchResult.isShell) {
-        // SPA / JS shell detected: allowed to proceed as INCONCLUSIVE
-        const verdict = {
-          pass: true,
-          rejection_stage: 'NONE',
-          rejection_reason: 'NONE',
-          healthReport,
-          validityReport: {
-            page_valid: true,
-            page_type: PAGE_TYPE.INCONCLUSIVE,
-            page_validity_reason: 'SPA_JAVASCRIPT_SHELL_ALLOWED',
-            evaluated: true
-          },
-          candidate: {
-            ...candidate,
-            final_url: finalUrl,
-            link_health_status: healthReport.health_status,
-            page_type: PAGE_TYPE.INCONCLUSIVE,
-            pageContentPreview: pageContent.substring(0, 300)
-          }
-        };
-        VERIFICATION_CACHE.set(canonicalUrl, verdict);
-        return verdict;
+    const validityReport = verifyPageValidity(finalUrl, healthReport, pageContent);
+    validityReport.evaluated = true;
+    const pass = validityReport.page_valid;
+    const verdict = {
+      pass,
+      rejection_stage: pass ? 'NONE' : 'PAGE_VALIDITY',
+      rejection_reason: pass ? 'NONE' : validityReport.page_validity_reason,
+      healthReport,
+      validityReport,
+      verificationTelemetry: {
+        cacheHit: false,
+        linkHealthFetchAttempted: Boolean(options.fetchFn),
+        pageFetchAttempted: false,
+        pageFetchSucceeded: false,
+        pageFetchFailed: false
+      },
+      candidate: {
+        ...candidate,
+        final_url: finalUrl,
+        link_health_status: healthReport.health_status,
+        page_type: validityReport.page_type,
+        pageContentPreview: pageContent.substring(0, 300)
       }
-    } else {
-      // Fallback to candidate snippet/title if body was not readable via lightweight fetch
-      pageContent = candidate.snippet || candidate.content || candidate.title || '';
-    }
+    };
+    VERIFICATION_CACHE.set(canonicalUrl, verdict);
+    return verdict;
   }
 
+  if (options.fetchFn && !options.fetchPageContent && candidate.snippet) {
+    // Hermetic link-health unit tests that mock fetchFn without page body (Phase A backward compatibility)
+    pageContent = candidate.snippet || candidate.content || candidate.title || '';
+    const validityReport = verifyPageValidity(finalUrl, healthReport, pageContent);
+    validityReport.evaluated = true;
+    const pass = validityReport.page_valid;
+    const verdict = {
+      pass,
+      rejection_stage: pass ? 'NONE' : 'PAGE_VALIDITY',
+      rejection_reason: pass ? 'NONE' : validityReport.page_validity_reason,
+      healthReport,
+      validityReport,
+      verificationTelemetry: {
+        cacheHit: false,
+        linkHealthFetchAttempted: true,
+        pageFetchAttempted: false,
+        pageFetchSucceeded: false,
+        pageFetchFailed: false
+      },
+      candidate: {
+        ...candidate,
+        final_url: finalUrl,
+        link_health_status: healthReport.health_status,
+        page_type: validityReport.page_type,
+        pageContentPreview: pageContent.substring(0, 300)
+      }
+    };
+    VERIFICATION_CACHE.set(canonicalUrl, verdict);
+    return verdict;
+  }
+
+  // Production & real page verification: fetch actual lightweight content from finalUrl
+  const fetchResult = await fetchLightweightPageContent(finalUrl, options);
+  if (!fetchResult.success || !fetchResult.content) {
+    // NEVER fallback to search snippet when real page fetch fails.
+    const verdict = {
+      pass: false,
+      rejection_stage: 'PAGE_VALIDITY',
+      rejection_reason: 'PAGE_CONTENT_FETCH_FAILED',
+      healthReport,
+      validityReport: {
+        page_valid: false,
+        page_type: PAGE_TYPE.ERROR_PAGE,
+        page_validity_reason: 'PAGE_CONTENT_FETCH_FAILED',
+        evaluated: true
+      },
+      verificationTelemetry: {
+        cacheHit: false,
+        linkHealthFetchAttempted: true,
+        pageFetchAttempted: true,
+        pageFetchSucceeded: false,
+        pageFetchFailed: true
+      },
+      candidate
+    };
+    VERIFICATION_CACHE.set(canonicalUrl, verdict);
+    return verdict;
+  }
+
+  if (fetchResult.isShell) {
+    // SPA / JS shell detected: allowed to proceed as INCONCLUSIVE
+    const verdict = {
+      pass: true,
+      rejection_stage: 'NONE',
+      rejection_reason: 'NONE',
+      healthReport,
+      validityReport: {
+        page_valid: true,
+        page_type: PAGE_TYPE.INCONCLUSIVE,
+        page_validity_reason: 'SPA_JAVASCRIPT_SHELL_ALLOWED',
+        evaluated: true
+      },
+      verificationTelemetry: {
+        cacheHit: false,
+        linkHealthFetchAttempted: true,
+        pageFetchAttempted: true,
+        pageFetchSucceeded: true,
+        pageFetchFailed: false
+      },
+      candidate: {
+        ...candidate,
+        final_url: finalUrl,
+        link_health_status: healthReport.health_status,
+        page_type: PAGE_TYPE.INCONCLUSIVE,
+        pageContentPreview: fetchResult.content.substring(0, 300)
+      }
+    };
+    VERIFICATION_CACHE.set(canonicalUrl, verdict);
+    return verdict;
+  }
+
+  pageContent = fetchResult.content;
   const validityReport = verifyPageValidity(finalUrl, healthReport, pageContent);
   validityReport.evaluated = true;
 
@@ -586,6 +711,13 @@ export async function evaluateCandidateValidityGate(candidate, options = {}) {
       rejection_reason: validityReport.page_validity_reason,
       healthReport,
       validityReport,
+      verificationTelemetry: {
+        cacheHit: false,
+        linkHealthFetchAttempted: true,
+        pageFetchAttempted: true,
+        pageFetchSucceeded: true,
+        pageFetchFailed: false
+      },
       candidate
     };
     VERIFICATION_CACHE.set(canonicalUrl, verdict);
@@ -599,6 +731,13 @@ export async function evaluateCandidateValidityGate(candidate, options = {}) {
     rejection_reason: 'NONE',
     healthReport,
     validityReport,
+    verificationTelemetry: {
+      cacheHit: false,
+      linkHealthFetchAttempted: true,
+      pageFetchAttempted: true,
+      pageFetchSucceeded: true,
+      pageFetchFailed: false
+    },
     candidate: {
       ...candidate,
       final_url: finalUrl,

@@ -222,6 +222,21 @@ export function scoreSearchResult(item, context = {}) {
   };
 }
 
+export function shouldPersistDiscoveryLeads(persistToDb, auditOnly) {
+  return Boolean(persistToDb) && !auditOnly;
+}
+
+export function resolvePhaseDPilotConfig(options = {}) {
+  return {
+    ...options,
+    cycle: 1,
+    batchSize: 20,
+    days: 30,
+    persistToDb: false,
+    auditOnly: true
+  };
+}
+
 export async function runFullDiscoveryPipeline(config = {}) {
   const {
     days = 30,
@@ -231,7 +246,8 @@ export async function runFullDiscoveryPipeline(config = {}) {
     siteFilter = null,
     location = null,
     mode = DISCOVERY_MODE.STANDARD,
-    persistToDb = (process.env.PERSIST_TO_DB !== 'false')
+    persistToDb = (process.env.PERSIST_TO_DB !== 'false'),
+    auditOnly = false
   } = config;
 
   // Safeguards and thresholds
@@ -239,11 +255,14 @@ export async function runFullDiscoveryPipeline(config = {}) {
   const maxCrawlsPerQuery = Number(process.env.MAX_CRAWLS_PER_QUERY) || 3;
   const maxTotalCrawlsPerRun = Number(process.env.MAX_TOTAL_CRAWLS_PER_RUN) || 50;
 
+  // DB-write safety guard: even if persistToDb is true, auditOnly=true strictly prevents DB writes
+  const shouldPersist = shouldPersistDiscoveryLeads(persistToDb, auditOnly);
+
   console.log('================================================================');
   console.log(`🚀 RUNNING PROJECT DISCOVERY PIPELINE V2 [MODE: ${mode.toUpperCase()}]`);
   console.log(`   Config: Cycle ${cycle} | Batch Size: ${batchSize} | Days: ${days}`);
   console.log(`   Safeguards: Pre-Crawl Threshold: ${preCrawlThreshold} | Max/Query: ${maxCrawlsPerQuery} | Max Run Crawls: ${maxTotalCrawlsPerRun}`);
-  console.log(`   Persistence Mode: ${persistToDb ? 'ACTIVE (Persist to Supabase)' : 'AUDIT ONLY (PERSIST_TO_DB=false)'}`);
+  console.log(`   Persistence Mode: ${shouldPersist ? 'ACTIVE (Persist to Supabase)' : `AUDIT ONLY (persistToDb=${persistToDb}, auditOnly=${auditOnly} -> DB writes BLOCKED)`}`);
   if (categories) console.log(`   Selected Categories: ${categories.join(', ')}`);
   if (siteFilter) console.log(`   Site Filter: ${siteFilter}`);
   if (location) console.log(`   Target Location: ${location}`);
@@ -251,6 +270,19 @@ export async function runFullDiscoveryPipeline(config = {}) {
 
   const rotator = new QueryRotatorService({ days, batchSize, cycle, categories, siteFilter, location, mode });
   const searchQueries = rotator.getQueriesForCycle({ mode, batchSize });
+
+  if (config.dryRun) {
+    return {
+      mode,
+      cycle,
+      days,
+      batchSize: searchQueries.length,
+      persistToDb,
+      auditOnly,
+      shouldPersist,
+      queries: searchQueries
+    };
+  }
 
   console.log(`📋 Selected ${searchQueries.length} balanced prioritized queries [Mode: ${mode}]:`);
   searchQueries.forEach((q, i) => console.log(`   ${i + 1}. [${q.priority}|${q.intentType || 'gen'}|${q.qualityTier || 'A'}] ${q.query}`));
@@ -493,6 +525,8 @@ export async function runFullDiscoveryPipeline(config = {}) {
   let pageFetchAttempts = 0;
   let pageFetchSuccesses = 0;
   let pageFetchFailures = 0;
+  let verificationCacheHits = 0;
+  let verificationCacheMisses = 0;
   const verificationRejections = {};
   const verifiedCandidatePool = [];
 
@@ -508,7 +542,14 @@ export async function runFullDiscoveryPipeline(config = {}) {
           results[i] = {
             pass: false,
             rejection_stage: 'LINK_HEALTH',
-            rejection_reason: 'VERIFICATION_EXCEPTION'
+            rejection_reason: 'VERIFICATION_EXCEPTION',
+            verificationTelemetry: {
+              cacheHit: false,
+              linkHealthFetchAttempted: true,
+              pageFetchAttempted: false,
+              pageFetchSucceeded: false,
+              pageFetchFailed: false
+            }
           };
         }
       }
@@ -527,26 +568,45 @@ export async function runFullDiscoveryPipeline(config = {}) {
 
     if (!gateRes) continue;
 
+    // Extract explicit telemetry from gate result
+    const telem = gateRes.verificationTelemetry || {
+      cacheHit: Boolean(gateRes.fromCache),
+      linkHealthFetchAttempted: !gateRes.fromCache,
+      pageFetchAttempted: !gateRes.fromCache && Boolean(gateRes.healthReport?.is_accessible),
+      pageFetchSucceeded: !gateRes.fromCache && Boolean(gateRes.candidate?.pageContentPreview || gateRes.pass),
+      pageFetchFailed: !gateRes.fromCache && !gateRes.pass && gateRes.rejection_reason === 'PAGE_CONTENT_FETCH_FAILED'
+    };
+
+    if (telem.cacheHit) {
+      verificationCacheHits++;
+    } else {
+      verificationCacheMisses++;
+    }
+
+    // Cached verification must NOT count as a new page fetch attempt
+    if (telem.pageFetchAttempted) {
+      pageFetchAttempts++;
+      if (telem.pageFetchSucceeded) {
+        pageFetchSuccesses++;
+      }
+      if (telem.pageFetchFailed) {
+        pageFetchFailures++;
+      }
+    }
+
     // Check Link Health
     if (gateRes.healthReport && gateRes.healthReport.is_accessible) {
       linkHealthPassed++;
       // Gate 2: Page Validity was evaluated
       pageValidityChecked++;
-      pageFetchAttempts++;
-
-      if (gateRes.candidate?.pageContentPreview || gateRes.pass) {
-        pageFetchSuccesses++;
-      } else {
-        pageFetchFailures++;
-      }
 
       if (gateRes.validityReport && gateRes.validityReport.page_valid) {
         pageValidityPassed++;
         verifiedCandidatePool.push({
           ...item,
-          final_url: gateRes.candidate.final_url || item.url,
-          link_health_status: gateRes.candidate.link_health_status,
-          page_type: gateRes.candidate.page_type,
+          final_url: gateRes.candidate?.final_url || item.url,
+          link_health_status: gateRes.candidate?.link_health_status,
+          page_type: gateRes.candidate?.page_type,
           verificationGate: gateRes
         });
       } else {
@@ -570,11 +630,10 @@ export async function runFullDiscoveryPipeline(config = {}) {
     }
   }
 
-  const cacheStats = getVerificationCacheStats();
-
   console.log(`   -> Link Health: Checked: ${linkHealthChecked} | Passed: ${linkHealthPassed} | Failed: ${linkHealthFailed}`);
   console.log(`   -> Page Validity: Checked: ${pageValidityChecked} | Passed: ${pageValidityPassed} | Failed: ${pageValidityFailed}`);
-  console.log(`   -> Verification Cache: Hits: ${cacheStats.cacheHits} | Misses: ${cacheStats.cacheMisses}`);
+  console.log(`   -> Page Fetch: Attempts: ${pageFetchAttempts} | Successes: ${pageFetchSuccesses} | Failures: ${pageFetchFailures}`);
+  console.log(`   -> Verification Cache: Hits: ${verificationCacheHits} | Misses: ${verificationCacheMisses}`);
   console.log(`   -> Candidates Surviving Verification Gate: ${verifiedCandidatePool.length}`);
 
   // -------------------------------------------------------------
@@ -795,14 +854,14 @@ export async function runFullDiscoveryPipeline(config = {}) {
   }
 
   // -------------------------------------------------------------
-  // 9. DATABASE PERSISTENCE (Auditable with PERSIST_TO_DB)
+  // 9. DATABASE PERSISTENCE (Auditable with PERSIST_TO_DB & auditOnly)
   // -------------------------------------------------------------
-  if (persistToDb && qualifiedProjects.length > 0) {
+  if (shouldPersist && qualifiedProjects.length > 0) {
     console.log(`💾 Persisting ${qualifiedProjects.length} qualified leads into Database...`);
     const dbRes = await saveMasterProjects(qualifiedProjects);
     console.log(`✅ Supabase Database updated! Total active projects: ${dbRes.total || qualifiedProjects.length}`);
-  } else if (!persistToDb && qualifiedProjects.length > 0) {
-    console.log(`🔍 [AUDIT RUN] Persistence disabled (persistToDb=false). Generated ${qualifiedProjects.length} qualified leads without modifying DB.`);
+  } else if (!shouldPersist && qualifiedProjects.length > 0) {
+    console.log(`🔍 [AUDIT RUN] Persistence disabled (persistToDb=${persistToDb}, auditOnly=${auditOnly}). Generated ${qualifiedProjects.length} qualified leads without modifying DB.`);
   }
 
   return {
@@ -821,8 +880,8 @@ export async function runFullDiscoveryPipeline(config = {}) {
       pageFetchAttempts,
       pageFetchSuccesses,
       pageFetchFailures,
-      verificationCacheHits: cacheStats.cacheHits,
-      verificationCacheMisses: cacheStats.cacheMisses,
+      verificationCacheHits,
+      verificationCacheMisses,
       candidateStates: candidateStateCounts,
       preFilterAccepted: totalPreFilterAccepted,
       preFilterRejected: totalPreFilterRejected,
@@ -844,18 +903,13 @@ export async function runFullDiscoveryPipeline(config = {}) {
 
 /**
  * GAP 4: Phase D 20-Query Controlled Pilot Runner (Audit Only)
- * Guarantees cycle=1, batchSize=20, persistToDb=false, auditOnly=true
+ * Guarantees cycle=1, batchSize=20, days=30, persistToDb=false, auditOnly=true
+ * Callers CANNOT override these locked values.
  */
 export async function runPhaseDPilot(options = {}) {
   console.log('🏁 [PHASE D PILOT] Initializing 1 controlled cycle of exactly 20 queries (Audit Mode, 0 DB persistence)...');
-  return runFullDiscoveryPipeline({
-    cycle: 1,
-    batchSize: 20,
-    days: 30,
-    persistToDb: false,
-    auditOnly: true,
-    ...options
-  });
+  const lockedConfig = resolvePhaseDPilotConfig(options);
+  return runFullDiscoveryPipeline(lockedConfig);
 }
 
 if (process.argv[1]?.endsWith('runSearchAndDirectDiscovery.js')) {
