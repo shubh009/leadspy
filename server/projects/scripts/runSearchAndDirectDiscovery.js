@@ -619,6 +619,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
   return {
     mode,
     cycle,
+    projects: qualifiedProjects,
     metrics: {
       rawResults: dedupMetrics.rawResults,
       uniqueResults: totalEvaluated,
