@@ -46,6 +46,7 @@ export async function saveMasterProjects(projects = []) {
 
   let insertedCount = 0;
   let updatedCount = 0;
+  const currentBatchRecords = [];
 
   for (const p of projects) {
     // Generate unique, deterministic canonical ID using MD5 hash of source_url
@@ -82,10 +83,12 @@ export async function saveMasterProjects(projects = []) {
       intent: p.projectIntent || p.intent || 'Looking for Developer',
       relevance_score: p.relevanceScore || 85,
       contactability_score: p.contactabilityScore || 80,
-      posted_at: p.postedAt || new Date().toISOString(),
+      posted_at: p.postedAt || null,
       discovered_at: p.discoveredAt || new Date().toISOString(),
       status: 'active'
     };
+
+    currentBatchRecords.push(record);
 
     const existingIdx = IN_MEMORY_PROJECTS.findIndex(item => item.source_url === record.source_url);
     if (existingIdx >= 0) {
@@ -107,19 +110,19 @@ export async function saveMasterProjects(projects = []) {
     return {
       success: false,
       attempted: projects.length,
-      inserted: insertedCount,
-      updated: updatedCount,
+      inserted: 0,
+      updated: 0,
       total: IN_MEMORY_PROJECTS.length,
       error: 'Supabase credentials missing or set to placeholder values'
     };
   }
 
-  // Batch Upsert to Supabase in ONE single fast query
+  // Batch Upsert to Supabase in ONE single fast query (Current batch only, P0.7)
   try {
     const seen = new Set();
     const recordsToUpsert = [];
 
-    for (const p of IN_MEMORY_PROJECTS) {
+    for (const p of currentBatchRecords) {
       const cid = p.canonical_id || `proj-${crypto.createHash('md5').update(p.source_url || p.title || String(Math.random())).digest('hex')}`;
       if (!seen.has(cid)) {
         seen.add(cid);
@@ -148,7 +151,7 @@ export async function saveMasterProjects(projects = []) {
           project_type: p.project_type || 'Contract',
           intent: p.intent || 'Looking for Developer',
           relevance_score: p.relevance_score || 85,
-          posted_at: p.posted_at || new Date().toISOString(),
+          posted_at: p.posted_at || p.postedAt || p.discovered_at || p.discoveredAt || new Date().toISOString(),
           discovered_at: p.discovered_at || new Date().toISOString(),
           last_seen_at: p.last_seen_at || new Date().toISOString(),
           status: 'active'

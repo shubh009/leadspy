@@ -189,7 +189,7 @@ export class CanonicalDeduplicator {
   /**
    * Step 1 Pre-Filter: URL & Source ID Checks (run before network fetch)
    */
-  checkUrlCandidate(cand) {
+  checkUrlCandidate(cand, queryContext = null) {
     this.metrics.rawResults++;
     const rawUrl = cand.url || cand.sourceUrl;
 
@@ -197,12 +197,13 @@ export class CanonicalDeduplicator {
       return { isDuplicate: true, reason: 'EMPTY_URL' };
     }
 
+    const context = queryContext || cand.queryContext || {};
     const canonicalUrl = this.normalizeUrl(rawUrl);
 
     // 1. Raw URL Deduplication
     if (this.seenRawUrls.has(rawUrl)) {
       this.metrics.urlDuplicatesRemoved++;
-      this._updateMetadata(canonicalUrl || rawUrl, cand);
+      this._updateMetadata(canonicalUrl || rawUrl, cand, context);
       return { isDuplicate: true, reason: 'RAW_URL_DUPLICATE', canonicalUrl };
     }
     this.seenRawUrls.add(rawUrl);
@@ -210,7 +211,7 @@ export class CanonicalDeduplicator {
     // 2. Generic Normalized URL Deduplication
     if (this.seenCanonicalUrls.has(canonicalUrl)) {
       this.metrics.canonicalUrlDuplicatesRemoved++;
-      this._updateMetadata(canonicalUrl, cand);
+      this._updateMetadata(canonicalUrl, cand, context);
       return { isDuplicate: true, reason: 'CANONICAL_URL_DUPLICATE', canonicalUrl };
     }
     this.seenCanonicalUrls.add(canonicalUrl);
@@ -222,14 +223,14 @@ export class CanonicalDeduplicator {
     if (sourceCanonicalId) {
       if (this.seenSourceIds.has(sourceCanonicalId)) {
         this.metrics.sourceIdDuplicatesRemoved++;
-        this._updateMetadata(canonicalUrl, cand);
+        this._updateMetadata(canonicalUrl, cand, context);
         return { isDuplicate: true, reason: 'SOURCE_ID_DUPLICATE', canonicalId: sourceCanonicalId, canonicalUrl };
       }
       this.seenSourceIds.add(sourceCanonicalId);
     }
 
     // First time seeing this candidate: initialize cross-query metadata
-    const cluster = cand.queryContext?.deliverableType || cand.queryContext?.intentType || 'general';
+    const cluster = context.deliverableType || context.intentType || 'general';
     this.candidateMetadataMap.set(canonicalUrl, {
       canonicalUrl,
       canonicalId: sourceCanonicalId,
@@ -246,7 +247,7 @@ export class CanonicalDeduplicator {
     };
   }
 
-  _updateMetadata(canonicalUrl, cand) {
+  _updateMetadata(canonicalUrl, cand, queryContext = null) {
     const meta = this.candidateMetadataMap.get(canonicalUrl);
     if (meta) {
       meta.query_count++;
@@ -256,7 +257,8 @@ export class CanonicalDeduplicator {
       if (cand.rank && cand.rank < meta.best_rank) {
         meta.best_rank = cand.rank;
       }
-      const cluster = cand.queryContext?.deliverableType || cand.queryContext?.intentType || 'general';
+      const context = queryContext || cand.queryContext || {};
+      const cluster = context.deliverableType || context.intentType || 'general';
       meta.distinct_clusters.add(cluster);
     }
   }

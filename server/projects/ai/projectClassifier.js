@@ -14,6 +14,112 @@ export const CLASSIFICATION_MODE = {
 };
 
 /**
+ * Hard Freshness Gate (P0.4)
+ * Evaluates candidate post age against configured window (default 30 days).
+ * Strict rejection for stale candidates; never invents fake Date.now().
+ */
+export function evaluateFreshnessGate(candidate = {}, maxDays = 30) {
+  const postedAt = candidate.postedAt;
+  const text = `${candidate.title || ''} ${candidate.snippet || ''} ${candidate.content || ''} ${candidate.rawContent || ''}`.toLowerCase();
+
+  // 1. Explicit date evaluation
+  if (postedAt) {
+    const postTime = new Date(postedAt).getTime();
+    if (!isNaN(postTime)) {
+      const ageDays = (Date.now() - postTime) / (86400 * 1000);
+      if (Math.floor(ageDays) > maxDays) {
+        return {
+          pass: false,
+          rejection_gate: 'GATE_5',
+          rejection_reason: 'STALE_PROJECT',
+          evidence: `Project posted ${Math.round(ageDays)} days ago, exceeding ${maxDays}d window`,
+          freshnessStatus: 'archive',
+          postedAt: new Date(postTime).toISOString(),
+          ageDays: Math.round(ageDays)
+        };
+      }
+      return {
+        pass: true,
+        freshnessStatus: 'fresh',
+        postedAt: new Date(postTime).toISOString(),
+        ageDays: Math.round(ageDays)
+      };
+    }
+  }
+
+  // 2. Date missing: check for past-year stale text markers (e.g. 2020-2025 or "posted X years ago")
+  const staleYearRegex = /\b(201\d|2020|2021|2022|2023|2024|2025)\b|posted\s*(\d+)\s*(months?|years?)\s*ago/i;
+  if (staleYearRegex.test(text)) {
+    return {
+      pass: false,
+      rejection_gate: 'GATE_5',
+      rejection_reason: 'STALE_PROJECT',
+      evidence: 'Stale date/year markers detected in content text',
+      freshnessStatus: 'archive',
+      postedAt: null,
+      ageDays: null
+    };
+  }
+
+  // 3. No explicit date and no stale markers -> explicit recent_discovery (preserves null postedAt)
+  return {
+    pass: true,
+    freshnessStatus: 'recent_discovery',
+    postedAt: null,
+    ageDays: null
+  };
+}
+
+/**
+ * Deterministic Final Confidence Gate (P0.3)
+ * Formula: clamp(0, 100, relevance * 0.50 + deliverable * 0.30 + intent * 0.20 + crossQueryBoost - vaguenessPenalty)
+ */
+export function evaluateFinalConfidenceGate(candidate = {}, result = {}, threshold = null) {
+  const finalThreshold = Number(threshold ?? process.env.FINAL_CONFIDENCE_THRESHOLD) || 70;
+  const relevanceScore = Number(result?.relevanceScore) || 85;
+
+  const fullText = `${candidate?.title || ''} ${candidate?.snippet || ''} ${candidate?.content || ''} ${candidate?.rawContent || ''}`.toLowerCase();
+  const concreteDeliverableRegex = /\b(crm|erp|saas|mvp|mobile app|web app|ios|android|dashboard|portal|api integration|ecommerce platform|automation|software)\b/i;
+  const deliverableScore = concreteDeliverableRegex.test(fullText) ? 90 : 60;
+
+  const explicitProcurementRegex = /\b(hire|hiring|budget|quote|rfp|scope of work|statement of work|looking for agency|looking for developer|need developer|fixed price|\$|₹)\b/i;
+  const buyerIntentScore = explicitProcurementRegex.test(fullText) ? 90 : 60;
+
+  let crossQueryBoost = 0;
+  if (candidate?.crossQueryBoost) {
+    crossQueryBoost = Number(candidate.crossQueryBoost);
+  } else if (candidate?.matched_queries && candidate.matched_queries.length > 1) {
+    crossQueryBoost = 5;
+  }
+
+  let vaguenessPenalty = 0;
+  const cleanLen = (candidate?.rawContent || candidate?.content || candidate?.snippet || '').trim().length;
+  if (cleanLen < 50) {
+    vaguenessPenalty = 15;
+  }
+
+  const rawConfidence = (relevanceScore * 0.50) + (deliverableScore * 0.30) + (buyerIntentScore * 0.20) + crossQueryBoost - vaguenessPenalty;
+  const finalConfidence = Math.max(0, Math.min(100, Math.round(rawConfidence)));
+
+  if (finalConfidence < finalThreshold) {
+    return {
+      pass: false,
+      finalConfidence,
+      threshold: finalThreshold,
+      rejection_gate: 'GATE_9',
+      rejection_reason: 'LOW_FINAL_CONFIDENCE',
+      evidence_summary: `Final confidence score ${finalConfidence} is below threshold ${finalThreshold}`
+    };
+  }
+
+  return {
+    pass: true,
+    finalConfidence,
+    threshold: finalThreshold
+  };
+}
+
+/**
  * AI Project Classifier & Structured Entity Extractor
  * Enforces strict IT Project Qualification & Actionable Contactability
  * Based on Project Discovery Engine Change Request Specification
@@ -27,7 +133,10 @@ export class ProjectClassifier {
     this.model = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash';
     this.seenSignatures = new Set();
     this.seenProjects = [];
-    this.enableDeduplication = true;
+    this.enableDeduplication = options.enableDeduplication ?? true;
+    this.strictContactRequirement = options.strictContactRequirement ?? true;
+    this.finalConfidenceThreshold = options.finalConfidenceThreshold ?? (Number(process.env.FINAL_CONFIDENCE_THRESHOLD) || 70);
+    this.maxDays = options.maxDays || 30;
   }
 
   resetDeduplicationCache() {
@@ -47,9 +156,9 @@ export class ProjectClassifier {
   }
 
   /**
-   * Sources explicitly excluded from project ingestion
+   * Sources explicitly excluded from project ingestion (P1.4)
    */
-  static EXCLUDED_SOURCES = ['freelancer', 'guru', 'peopleperhour'];
+  static EXCLUDED_SOURCES = ['freelancer', 'guru', 'peopleperhour', 'upwork', 'seeking'];
 
   /**
    * Qualify and parse a candidate post
@@ -67,14 +176,26 @@ export class ProjectClassifier {
       };
     }
 
-    // 0. Excluded sources check (Section 9 & 15)
+    // 0. Excluded sources & marketplace landing page check (P1.4)
     const sourceLower = (candidate.source || '').toLowerCase();
-    if (ProjectClassifier.EXCLUDED_SOURCES.some(s => sourceLower.includes(s))) {
+    const targetUrl = (candidate.sourceUrl || candidate.url || '').toLowerCase();
+    const isExcludedMarketplaceUrl = 
+      targetUrl.includes('upwork.com/freelance') ||
+      targetUrl.includes('upwork.com/hire') ||
+      targetUrl.includes('upwork.com/outcomes') ||
+      targetUrl.includes('upwork.com/jobs') ||
+      targetUrl.includes('freelancer.com/jobs') ||
+      targetUrl.includes('freelancer.com/hire') ||
+      targetUrl.includes('guru.com/d/jobs') ||
+      targetUrl.includes('peopleperhour.com/freelance') ||
+      targetUrl.includes('seeking.com');
+
+    if (ProjectClassifier.EXCLUDED_SOURCES.some(s => sourceLower.includes(s)) || isExcludedMarketplaceUrl) {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'SOURCE_NOT_ALLOWED',
         rejection_gate: 'GATE_0',
-        evidence_summary: `Source '${candidate.source}' is on the excluded platform list`,
+        evidence_summary: `Source platform '${candidate.source || targetUrl}' is on the excluded platform list`,
         is_client_side_project: false
       };
     }
@@ -86,7 +207,8 @@ export class ProjectClassifier {
     const heuristicCheck = this.heuristicQualification(candidate);
 
     if (this.classificationMode === CLASSIFICATION_MODE.HEURISTIC) {
-      return this.applyGate8Deduplication(candidate, heuristicCheck);
+      const res = this.applyGate8Deduplication(candidate, heuristicCheck);
+      return this.applyGate9Confidence(candidate, res);
     }
 
     // If deterministic gates rejected the candidate, enforce immediate hard rejection
@@ -126,7 +248,29 @@ export class ProjectClassifier {
       result = heuristicCheck;
     }
 
-    return this.applyGate8Deduplication(candidate, result);
+    const dedupedResult = this.applyGate8Deduplication(candidate, result);
+    return this.applyGate9Confidence(candidate, dedupedResult);
+  }
+
+  applyGate9Confidence(candidate, result) {
+    if (!result || result.qualification_status !== 'qualified') return result;
+    const gate9Check = evaluateFinalConfidenceGate(candidate, result, this.finalConfidenceThreshold);
+    if (!gate9Check.pass) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: gate9Check.rejection_reason || 'LOW_FINAL_CONFIDENCE',
+        rejection_gate: gate9Check.rejection_gate || 'GATE_9',
+        evidence_summary: gate9Check.evidence_summary || `Final confidence below threshold ${gate9Check.threshold}`,
+        finalConfidence: gate9Check.finalConfidence,
+        threshold: gate9Check.threshold,
+        is_client_side_project: Boolean(result.is_client_side_project),
+        has_actionable_contact: Boolean(result.has_actionable_contact),
+        contact_type: result.contact_type || 'none'
+      };
+    }
+    result.finalConfidence = gate9Check.finalConfidence;
+    result.confidenceThreshold = gate9Check.threshold;
+    return result;
   }
 
   applyGate8Deduplication(candidate, result) {
@@ -436,7 +580,7 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
                                          /\b(build|develop|create|code)\s*(custom\s*)?(marketing automation|automation software)\b/i.test(fullText);
 
     const isPayrollSoftware = /payroll\s*(system|software|module|app|platform)/i.test(fullText);
-    const nonItRegex = /\b(payroll|student assistant|receptionist|accountant|garment|fashion communication|escort|sales executive|telecaller|bpo|data entry|operator|marketer|marketers|marketing|social media marketing|copywriter|content writer|va\b|virtual assistant|video editor|thumbnail|voice actor|graphic designer for social media|posting on (instagram|tiktok|facebook|reddit)|manage instagram)\b/i;
+    const nonItRegex = /\b(dating|matchmaking|sugar daddy|sugar baby|seeking\.com|payroll|student assistant|receptionist|accountant|garment|fashion communication|escort|sales executive|telecaller|bpo|data entry|operator|marketer|marketers|marketing|social media marketing|copywriter|content writer|va\b|virtual assistant|video editor|thumbnail|voice actor|graphic designer for social media|posting on (instagram|tiktok|facebook|reddit)|manage instagram)\b/i;
 
     if (!isItDeliverableWithMarketing && !isPayrollSoftware && (nonItRegex.test(title) || nonItRegex.test(content.substring(0, 300)))) {
       return {
@@ -445,6 +589,20 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
         rejection_gate: 'GATE_5',
         evidence_summary: 'Non-IT service offering or marketing/VA gig without custom software engineering deliverable',
         is_it_project: false,
+        is_client_side_project: false,
+        has_actionable_contact: false,
+        contact_type: 'none'
+      };
+    }
+
+    // Gate 5 Freshness check (P0.4)
+    const freshnessCheck = evaluateFreshnessGate(candidate, this.maxDays);
+    if (!freshnessCheck.pass) {
+      return {
+        qualification_status: 'rejected',
+        rejection_reason: freshnessCheck.rejection_reason || 'STALE_PROJECT',
+        rejection_gate: freshnessCheck.rejection_gate || 'GATE_5',
+        evidence_summary: freshnessCheck.evidence || 'Stale project exceeding freshness window',
         is_client_side_project: false,
         has_actionable_contact: false,
         contact_type: 'none'
@@ -567,15 +725,17 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     if (contactType === 'none') {
-      return {
-        qualification_status: 'rejected',
-        rejection_reason: 'NO_ACTIONABLE_CONTACT',
-        rejection_gate: 'GATE_7',
-        evidence_summary: 'No valid email, phone, business contact page, or actionable native messaging profile found',
-        is_client_side_project: true,
-        has_actionable_contact: false,
-        contact_type: 'none'
-      };
+      if (this.strictContactRequirement) {
+        return {
+          qualification_status: 'rejected',
+          rejection_reason: 'NO_ACTIONABLE_CONTACT',
+          rejection_gate: 'GATE_7',
+          evidence_summary: 'No valid email, phone, business contact page, or actionable native messaging profile found',
+          is_client_side_project: true,
+          has_actionable_contact: false,
+          contact_type: 'none'
+        };
+      }
     }
 
     // ----------------------------------------------------
@@ -646,12 +806,16 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     const shortSummary = content.substring(0, 180).trim() + (content.length > 180 ? '...' : '');
+    const hasContact = contactType !== 'none' && Boolean(contactValue);
+    const contactScore = contactType === 'email' ? 95 : (contactType === 'phone' ? 90 : (contactType === 'public_business_contact' ? 85 : (contactType === 'public_profile_message' ? 80 : 0)));
 
     return {
       qualification_status: 'qualified',
       rejection_reason: null,
       rejection_gate: null,
-      evidence_summary: 'Qualified commercial IT development requirement with verified contact channel',
+      evidence_summary: hasContact
+        ? 'Qualified commercial IT development requirement with verified contact channel'
+        : 'Qualified commercial IT development requirement without direct actionable contact',
       is_it_project: true,
       is_client_side_project: true,
       is_employment: false,
@@ -681,30 +845,31 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       currency,
       projectType: budget ? 'Fixed Price' : 'Contract',
       projectIntent: 'Looking for Agency / Developer',
-      has_actionable_contact: true,
+      has_actionable_contact: hasContact,
       contact_type: contactType,
       contact_value: contactValue,
       relevanceScore: 88,
-      contactabilityScore: contactType === 'email' ? 95 : (contactType === 'phone' ? 90 : 80),
+      contactabilityScore: contactScore,
       qualification_evidence: {
         it_deliverable_detected: true,
         buyer_intent_detected: true,
-        contact_verified: true,
+        contact_verified: hasContact,
         contact_channel: contactType
       },
-      postedAt: candidate.postedAt || new Date().toISOString(),
+      postedAt: candidate.postedAt || null,
+      freshnessStatus: freshnessCheck.freshnessStatus || (candidate.postedAt ? 'fresh' : 'recent_discovery'),
       discoveredAt: new Date().toISOString()
     };
   }
 
   formatExtractedProject(candidate, llmResult, heuristicFallback) {
-    // If LLM says rejected or has no actionable contact, reject
-    if (llmResult.qualification_status === 'rejected' || !llmResult.has_actionable_contact || llmResult.contact_type === 'none') {
+    // If LLM explicitly rejected the post as non-project, respect LLM rejection
+    if (llmResult.qualification_status === 'rejected') {
       return {
         qualification_status: 'rejected',
-        rejection_reason: llmResult.rejection_reason || 'NO_ACTIONABLE_CONTACT',
+        rejection_reason: llmResult.rejection_reason || 'UNQUALIFIED',
         rejection_gate: 'GATE_7',
-        evidence_summary: 'Rejected by LLM: no actionable contact or requirement found',
+        evidence_summary: 'Rejected by LLM: no requirement found',
         is_client_side_project: Boolean(llmResult.is_client_side_project),
         has_actionable_contact: false,
         contact_type: 'none'
@@ -712,10 +877,11 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     }
 
     // Ensure LLM does NOT hallucinate sourceUrl as contact
-    const contactType = heuristicFallback.contact_type || llmResult.contact_type || 'none';
+    const contactType = heuristicFallback.contact_type || (['email', 'phone', 'public_business_contact', 'public_profile_message'].includes(llmResult.contact_type) ? llmResult.contact_type : 'none');
     const contactValue = heuristicFallback.contact_value || llmResult.contact_value || null;
+    const hasContact = contactType !== 'none' && Boolean(contactValue);
 
-    if (contactType === 'none' || !contactValue) {
+    if (!hasContact && this.strictContactRequirement) {
       return {
         qualification_status: 'rejected',
         rejection_reason: 'NO_ACTIONABLE_CONTACT',
@@ -731,7 +897,9 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       qualification_status: 'qualified',
       rejection_reason: null,
       rejection_gate: null,
-      evidence_summary: 'Qualified commercial IT development requirement verified by hybrid engine',
+      evidence_summary: hasContact
+        ? 'Qualified commercial IT development requirement verified by hybrid engine'
+        : 'Qualified commercial IT development requirement without direct actionable contact',
       is_it_project: true,
       is_client_side_project: true,
       is_employment: false,
@@ -760,19 +928,20 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
       currency: llmResult.currency || heuristicFallback.currency,
       projectType: llmResult.project_type || heuristicFallback.projectType,
       projectIntent: llmResult.project_intent || heuristicFallback.projectIntent,
-      has_actionable_contact: true,
+      has_actionable_contact: hasContact,
       contact_type: contactType,
       contact_value: contactValue,
       relevanceScore: llmResult.relevance_score || 85,
-      contactabilityScore: llmResult.contactability_score || 80,
+      contactabilityScore: hasContact ? (llmResult.contactability_score || 80) : 0,
       confidence: llmResult.confidence || 85,
       qualification_evidence: {
         it_deliverable_detected: true,
         buyer_intent_detected: true,
-        contact_verified: true,
+        contact_verified: hasContact,
         contact_channel: contactType
       },
-      postedAt: candidate.postedAt || new Date().toISOString(),
+      postedAt: candidate.postedAt || null,
+      freshnessStatus: candidate.freshnessStatus || (candidate.postedAt ? 'fresh' : 'recent_discovery'),
       discoveredAt: new Date().toISOString()
     };
   }

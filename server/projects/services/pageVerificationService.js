@@ -58,7 +58,10 @@ export function getVerificationCacheStats() {
   return {
     cacheHits,
     cacheMisses,
-    size: VERIFICATION_CACHE.size
+    hits: cacheHits,
+    misses: cacheMisses,
+    size: VERIFICATION_CACHE.size,
+    totalEntries: VERIFICATION_CACHE.size
   };
 }
 
@@ -418,9 +421,29 @@ export async function fetchLightweightPageContent(url, options = {}) {
       };
     }
 
-    // Read text content up to maxBytes
+    // Read text content up to maxBytes with strict streaming limit (P1.1)
     let rawText = '';
-    if (typeof res.text === 'function') {
+    if (res.body && typeof res.body.getReader === 'function') {
+      try {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let bytesRead = 0;
+        let done = false;
+        while (!done && bytesRead < maxBytes) {
+          const chunk = await reader.read();
+          done = chunk.done;
+          if (chunk.value) {
+            bytesRead += chunk.value.length;
+            rawText += decoder.decode(chunk.value, { stream: !done });
+          }
+        }
+        try { await reader.cancel(); } catch (cancelErr) {}
+      } catch (streamErr) {
+        if (typeof res.text === 'function') {
+          try { rawText = await res.text(); } catch (e) { rawText = ''; }
+        }
+      }
+    } else if (typeof res.text === 'function') {
       try {
         rawText = await res.text();
       } catch (e) {

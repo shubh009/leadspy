@@ -27,6 +27,7 @@ export { validateProductionPersistenceConfig };
 import {
   evaluateCandidateValidityGate,
   getVerificationCacheStats,
+  clearVerificationCache,
   LINK_HEALTH_STATUS,
   PAGE_TYPE
 } from '../services/pageVerificationService.js';
@@ -172,6 +173,7 @@ export function scoreSearchResult(item, context = {}) {
                         domain.includes('naukri.com') ||
                         domain.includes('indeed.com') ||
                         domain.includes('glassdoor') ||
+                        domain.includes('seeking.com') ||
                         domain.includes('workindia');
   if (isBlacklisted) {
     score -= 100;
@@ -253,6 +255,102 @@ export function allocateQueriesAcrossCycles(totalQueries, cycles = [1, 2, 3]) {
   return cycles.map((_, idx) => (idx < remainder ? base + 1 : base));
 }
 
+/**
+ * Global Crawl Safety Budget for Phase E Multi-Cycle Discovery (P0.1)
+ * Enforces strict hard ceiling (default 50) across all cycles combined.
+ */
+export function createPhaseECrawlBudget(maxCrawls = 50) {
+  let totalCrawls = 0;
+  return {
+    canCrawl() {
+      return totalCrawls < maxCrawls;
+    },
+    recordCrawl() {
+      if (totalCrawls >= maxCrawls) return false;
+      totalCrawls++;
+      return true;
+    },
+    getCrawlsCount() {
+      return totalCrawls;
+    },
+    getRemaining() {
+      return Math.max(0, maxCrawls - totalCrawls);
+    },
+    getMaxCrawls() {
+      return maxCrawls;
+    },
+    getMetrics() {
+      return {
+        totalCrawls,
+        maxCrawls,
+        remaining: Math.max(0, maxCrawls - totalCrawls),
+        capHit: totalCrawls >= maxCrawls
+      };
+    }
+  };
+}
+
+/**
+ * Global Source Diversity Budget for Phase E Multi-Cycle Discovery (P0.2)
+ * Enforces cross-cycle domain and community caps:
+ * - Public Web: max 3 per root domain
+ * - Reddit: max 5 per subreddit, max 12 total
+ * - Hacker News: max 10 total
+ * - GitHub: max 8 total
+ */
+export function createPhaseEDiversityBudget() {
+  const domainCounts = {};
+  const redditSubredditCounts = {};
+  let hnCount = 0;
+  let ghCount = 0;
+
+  return {
+    canAccept(candidate) {
+      const url = candidate.final_url || candidate.url;
+      const domain = getCandidateRootDomain(url);
+      const source = candidate.sourceScope || candidate.source || 'public_web';
+
+      if (source === 'reddit' || domain === 'reddit.com') {
+        const sub = getRedditSubreddit(url);
+        const subCount = redditSubredditCounts[sub] || 0;
+        const totalReddit = Object.values(redditSubredditCounts).reduce((a, b) => a + b, 0);
+        return subCount < 5 && totalReddit < 12;
+      } else if (source === 'hackernews' || domain === 'ycombinator.com') {
+        return hnCount < 10;
+      } else if (source === 'github' || domain === 'github.com') {
+        return ghCount < 8;
+      } else {
+        const domCount = domainCounts[domain] || 0;
+        return domCount < 3;
+      }
+    },
+    recordAccept(candidate) {
+      const url = candidate.final_url || candidate.url;
+      const domain = getCandidateRootDomain(url);
+      const source = candidate.sourceScope || candidate.source || 'public_web';
+
+      if (source === 'reddit' || domain === 'reddit.com') {
+        const sub = getRedditSubreddit(url);
+        redditSubredditCounts[sub] = (redditSubredditCounts[sub] || 0) + 1;
+      } else if (source === 'hackernews' || domain === 'ycombinator.com') {
+        hnCount++;
+      } else if (source === 'github' || domain === 'github.com') {
+        ghCount++;
+      } else {
+        domainCounts[domain] = (domainCounts[domain] || 0) + 1;
+      }
+    },
+    getCounts() {
+      return {
+        domainCounts: { ...domainCounts },
+        redditSubredditCounts: { ...redditSubredditCounts },
+        hnCount,
+        ghCount
+      };
+    }
+  };
+}
+
 export function resolvePhaseDPilotConfig(options = {}) {
   return {
     ...options,
@@ -284,6 +382,10 @@ export async function runFullDiscoveryPipeline(config = {}) {
   const preCrawlThreshold = Number(process.env.PRE_CRAWL_THRESHOLD) || 45;
   const maxCrawlsPerQuery = Number(process.env.MAX_CRAWLS_PER_QUERY) || 3;
   const maxTotalCrawlsPerRun = Number(process.env.MAX_TOTAL_CRAWLS_PER_RUN) || 50;
+
+  // Global crawl and diversity budgets across runs/cycles (P0.1, P0.2)
+  const crawlBudget = config.crawlBudget || createPhaseECrawlBudget(maxTotalCrawlsPerRun);
+  const diversityBudget = config.diversityBudget || createPhaseEDiversityBudget();
 
   // DB-write safety guard: even if persistToDb is true, auditOnly=true strictly prevents DB writes
   const shouldPersist = shouldPersistDiscoveryLeads(persistToDb, auditOnly);
@@ -335,7 +437,11 @@ export async function runFullDiscoveryPipeline(config = {}) {
   const contentExtractor = new ContentExtractor();
   // Shared Canonical Deduplicator support across multi-cycle runs (Gap 4)
   const canonicalDeduplicator = config.canonicalDeduplicator || new CanonicalDeduplicator();
-  const classifier = new ProjectClassifier();
+  const classifier = config.classifier || new ProjectClassifier({
+    strictContactRequirement: false,
+    finalConfidenceThreshold: Number(process.env.FINAL_CONFIDENCE_THRESHOLD) || 70,
+    maxDays: days
+  });
 
   const rawCandidatePool = [];
   const queryStatsMap = new Map();
@@ -736,15 +842,12 @@ export async function runFullDiscoveryPipeline(config = {}) {
   scoredCandidates.sort((a, b) => b.preCrawlEval.score - a.preCrawlEval.score);
 
   const approvedForCrawl = [];
-  const domainCounts = {};
-  const redditSubredditCounts = {};
-  let hnCount = 0;
-  let ghCount = 0;
   const queryCrawlCounts = new Map();
   let crawlCapRejectedByQuery = 0;
+  let crawlCapRejectedByDiversity = 0;
 
   for (const candidate of scoredCandidates) {
-    if (approvedForCrawl.length >= maxTotalCrawlsPerRun) break;
+    if (!crawlBudget.canCrawl()) break;
 
     // Per-Query Crawl Cap Enforcement (Gap 3)
     const qStr = candidate.search_query || 'unknown';
@@ -759,35 +862,19 @@ export async function runFullDiscoveryPipeline(config = {}) {
       continue;
     }
 
-    const url = candidate.final_url || candidate.url;
-    const domain = getCandidateRootDomain(url);
-    const source = candidate.sourceScope || candidate.source || 'public_web';
-
-    // Source-native platforms have community/platform-aware caps instead of root-domain cap (Amendment 3)
-    if (source === 'reddit' || domain === 'reddit.com') {
-      const sub = getRedditSubreddit(url);
-      const subCount = redditSubredditCounts[sub] || 0;
-      const totalReddit = Object.values(redditSubredditCounts).reduce((a, b) => a + b, 0);
-      if (subCount >= 5 || totalReddit >= 12) continue; // community cap
-      redditSubredditCounts[sub] = subCount + 1;
-    } else if (source === 'hackernews' || domain === 'ycombinator.com') {
-      if (hnCount >= 10) continue;
-      hnCount++;
-    } else if (source === 'github' || domain === 'github.com') {
-      if (ghCount >= 8) continue;
-      ghCount++;
-    } else {
-      // General web: enforce max 3 per root domain
-      const domCount = domainCounts[domain] || 0;
-      if (domCount >= 3) continue;
-      domainCounts[domain] = domCount + 1;
+    // Cross-Cycle Diversity Cap Enforcement (P0.2)
+    if (!diversityBudget.canAccept(candidate)) {
+      crawlCapRejectedByDiversity++;
+      candidate.preCrawlEval.rejectionReason = 'DIVERSITY_CAP_REACHED';
+      continue;
     }
 
+    diversityBudget.recordAccept(candidate);
     queryCrawlCounts.set(qStr, currentQueryCrawls + 1);
     approvedForCrawl.push(candidate);
   }
 
-  console.log(`   -> Promising Candidates Scheduled for Deep Crawl: ${approvedForCrawl.length} (Global Cap: ${maxTotalCrawlsPerRun} | Per-Query Rejections: ${crawlCapRejectedByQuery})`);
+  console.log(`   -> Promising Candidates Scheduled for Deep Crawl: ${approvedForCrawl.length} (Global Cap: ${crawlBudget.getMaxCrawls()} | Per-Query Rejections: ${crawlCapRejectedByQuery} | Diversity Rejections: ${crawlCapRejectedByDiversity})`);
 
   // -------------------------------------------------------------
   // 6. SELECTIVE DEEP CRAWL & CONTENT FINGERPRINT DEDUPLICATION
@@ -797,6 +884,9 @@ export async function runFullDiscoveryPipeline(config = {}) {
   let extractionFailures = 0;
 
   for (const item of approvedForCrawl) {
+    if (!crawlBudget.canCrawl()) break;
+    crawlBudget.recordCrawl();
+
     const stat = queryStatsMap.get(item.search_query);
     if (stat) stat.deepCrawled++;
 
@@ -988,6 +1078,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
  * Callers CANNOT override these locked values.
  */
 export async function runPhaseDPilot(options = {}) {
+  clearVerificationCache();
   console.log('🏁 [PHASE D PILOT] Initializing 1 controlled cycle of exactly 20 queries (Audit Mode, 0 DB persistence)...');
   const lockedConfig = resolvePhaseDPilotConfig(options);
   return runFullDiscoveryPipeline(lockedConfig);
@@ -1013,15 +1104,23 @@ export async function runProductionScaledDiscovery(options = {}) {
     mode = DISCOVERY_MODE.STANDARD
   } = options;
 
+  // Clear verification cache before starting scaled run (P1.6)
+  clearVerificationCache();
+
   // Fail-fast environment validation (Gap 7)
   validateProductionPersistenceConfig(persistToDb, auditOnly);
 
   // Exact query allocation across cycles with remainder distribution (Gap 1)
   const cycleBatchSizes = allocateQueriesAcrossCycles(totalQueries, cycles);
 
+  // Global shared crawl safety and diversity budgets across all cycles (P0.1, P0.2)
+  const sharedCrawlBudget = options.crawlBudget || createPhaseECrawlBudget(Number(process.env.MAX_TOTAL_CRAWLS_PER_RUN) || 50);
+  const sharedDiversityBudget = options.diversityBudget || createPhaseEDiversityBudget();
+
   console.log('================================================================');
   console.log(`🚀 [PHASE E] PRODUCTION SCALED DISCOVERY RUNNER`);
   console.log(`   Target Queries: ${totalQueries} (Distribution: ${cycleBatchSizes.join(', ')}) | Cycles: ${cycles.join(', ')} | Days: ${days}`);
+  console.log(`   Safeguards: Global Deep Crawl Ceiling: ${sharedCrawlBudget.getMaxCrawls()}`);
   console.log(`   Persistence Mode: ${persistToDb && !auditOnly ? 'ACTIVE (Supabase DB writes ENABLED)' : 'AUDIT ONLY (DB writes BLOCKED)'}`);
   console.log('================================================================\n');
 
@@ -1063,7 +1162,9 @@ export async function runProductionScaledDiscovery(options = {}) {
     crawlCapRejectedByQuery: 0,
     deepCrawled: 0,
     qualifiedProjects: 0,
-    contactableProjects: 0
+    contactableProjects: 0,
+    phaseECrawlBudget: sharedCrawlBudget.getMetrics(),
+    diversityCounts: sharedDiversityBudget.getCounts()
   };
 
   for (let i = 0; i < cycles.length; i++) {
@@ -1086,6 +1187,8 @@ export async function runProductionScaledDiscovery(options = {}) {
       dryRun,
       mode,
       canonicalDeduplicator: sharedCanonicalDeduplicator,
+      crawlBudget: sharedCrawlBudget,
+      diversityBudget: sharedDiversityBudget,
       sourceMetrics: { ...cumulativeSourceMetrics }
     });
 
@@ -1130,6 +1233,8 @@ export async function runProductionScaledDiscovery(options = {}) {
       aggregatedMetrics.qualifiedProjects += cycleRes.metrics.qualifiedProjects || 0;
       aggregatedMetrics.contactableProjects += cycleRes.metrics.contactableProjects || 0;
     }
+    aggregatedMetrics.phaseECrawlBudget = sharedCrawlBudget.getMetrics();
+    aggregatedMetrics.diversityCounts = sharedDiversityBudget.getCounts();
   }
 
   const overallCrawlReductionRate = aggregatedMetrics.uniqueResults > 0

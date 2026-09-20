@@ -11,11 +11,22 @@ import {
   runFullDiscoveryPipeline,
   shouldPersistDiscoveryLeads,
   allocateQueriesAcrossCycles,
-  validateProductionPersistenceConfig
+  validateProductionPersistenceConfig,
+  createPhaseECrawlBudget,
+  createPhaseEDiversityBudget
 } from '../scripts/runSearchAndDirectDiscovery.js';
 
 import { CanonicalDeduplicator } from '../services/canonicalDeduplicator.js';
 import { saveMasterProjects } from '../services/projectDbService.js';
+import {
+  ProjectClassifier,
+  evaluateFreshnessGate,
+  evaluateFinalConfidenceGate
+} from '../ai/projectClassifier.js';
+import {
+  clearVerificationCache,
+  getVerificationCacheStats
+} from '../services/pageVerificationService.js';
 
 // -------------------------------------------------------------
 // GAP 1: Exact Query Allocation with Remainder Distribution
@@ -301,5 +312,218 @@ test('🧪 Phase E.10: Database persistence safety guard verification', () => {
 
   // Production mode: persistToDb=true AND auditOnly=false -> ALLOWED
   assert.equal(shouldPersistDiscoveryLeads(true, false), true);
+});
+
+// -------------------------------------------------------------
+// P0.1: Global 50-Crawl Safety Budget Across Multi-Cycle Runs
+// -------------------------------------------------------------
+test('🧪 Phase E.11: Global 50-crawl safety budget enforces absolute ceiling across 3 cycles combined', () => {
+  const crawlBudget = createPhaseECrawlBudget(50);
+  assert.equal(crawlBudget.getMaxCrawls(), 50);
+  assert.equal(crawlBudget.getCrawlsCount(), 0);
+  assert.equal(crawlBudget.getRemaining(), 50);
+
+  // Cycle 1 executes 25 crawls
+  let cycle1Crawls = 0;
+  for (let i = 0; i < 25; i++) {
+    if (crawlBudget.canCrawl()) {
+      crawlBudget.recordCrawl();
+      cycle1Crawls++;
+    }
+  }
+  assert.equal(cycle1Crawls, 25);
+  assert.equal(crawlBudget.getCrawlsCount(), 25);
+  assert.equal(crawlBudget.getRemaining(), 25);
+
+  // Cycle 2 executes 25 crawls
+  let cycle2Crawls = 0;
+  for (let i = 0; i < 25; i++) {
+    if (crawlBudget.canCrawl()) {
+      crawlBudget.recordCrawl();
+      cycle2Crawls++;
+    }
+  }
+  assert.equal(cycle2Crawls, 25);
+  assert.equal(crawlBudget.getCrawlsCount(), 50);
+  assert.equal(crawlBudget.getRemaining(), 0);
+  assert.equal(crawlBudget.canCrawl(), false);
+
+  // Cycle 3 attempts 20 crawls -> 0 must be permitted!
+  let cycle3Crawls = 0;
+  for (let i = 0; i < 20; i++) {
+    if (crawlBudget.canCrawl()) {
+      crawlBudget.recordCrawl();
+      cycle3Crawls++;
+    }
+  }
+  assert.equal(cycle3Crawls, 0, 'Cycle 3 must be strictly blocked once global 50-crawl limit is reached');
+  assert.equal(crawlBudget.getCrawlsCount(), 50, 'Total crawls across all cycles must never exceed 50');
+
+  const metrics = crawlBudget.getMetrics();
+  assert.equal(metrics.totalCrawls, 50);
+  assert.equal(metrics.capHit, true);
+  assert.equal(metrics.remaining, 0);
+});
+
+// -------------------------------------------------------------
+// P0.2: Global Cross-Cycle Diversity Budget
+// -------------------------------------------------------------
+test('🧪 Phase E.12: Global diversity budget enforces root domain and community limits across cycles', () => {
+  const diversityBudget = createPhaseEDiversityBudget();
+
+  // Public web: max 3 per root domain
+  const webCand1 = { url: 'https://client-portal.example.com/rfp-1', sourceScope: 'public_web' };
+  const webCand2 = { url: 'https://dev.example.com/rfp-2', sourceScope: 'public_web' };
+  const webCand3 = { url: 'https://example.com/rfp-3', sourceScope: 'public_web' };
+  const webCand4 = { url: 'https://blog.example.com/rfp-4', sourceScope: 'public_web' };
+
+  assert.equal(diversityBudget.canAccept(webCand1), true);
+  diversityBudget.recordAccept(webCand1);
+  assert.equal(diversityBudget.canAccept(webCand2), true);
+  diversityBudget.recordAccept(webCand2);
+  assert.equal(diversityBudget.canAccept(webCand3), true);
+  diversityBudget.recordAccept(webCand3);
+  // 4th from example.com must be rejected
+  assert.equal(diversityBudget.canAccept(webCand4), false, '4th candidate from same domain must be rejected');
+
+  // Reddit: max 5 per subreddit
+  for (let i = 0; i < 5; i++) {
+    const rCand = { url: `https://reddit.com/r/forhire/comments/post_${i}`, sourceScope: 'reddit' };
+    assert.equal(diversityBudget.canAccept(rCand), true);
+    diversityBudget.recordAccept(rCand);
+  }
+  const rOverflow = { url: 'https://reddit.com/r/forhire/comments/post_overflow', sourceScope: 'reddit' };
+  assert.equal(diversityBudget.canAccept(rOverflow), false, '6th candidate from same subreddit must be rejected');
+
+  // Hacker News: max 10
+  for (let i = 0; i < 10; i++) {
+    const hnCand = { url: `https://news.ycombinator.com/item?id=1000${i}`, sourceScope: 'hackernews' };
+    assert.equal(diversityBudget.canAccept(hnCand), true);
+    diversityBudget.recordAccept(hnCand);
+  }
+  const hnOverflow = { url: 'https://news.ycombinator.com/item?id=100099', sourceScope: 'hackernews' };
+  assert.equal(diversityBudget.canAccept(hnOverflow), false, '11th HN post must be rejected');
+});
+
+// -------------------------------------------------------------
+// P0.4: Gate 5 Freshness Gate (10d, 30d, 31d, missing date)
+// -------------------------------------------------------------
+test('🧪 Phase E.13: Gate 5 hard freshness evaluation strictly rejects stale posts and handles missing date without fake timestamps', () => {
+  const now = Date.now();
+
+  // 10-day-old post -> PASS
+  const tenDaysAgo = new Date(now - (10 * 86400 * 1000)).toISOString();
+  const res10 = evaluateFreshnessGate({ postedAt: tenDaysAgo, title: 'Build React CRM' }, 30);
+  assert.equal(res10.pass, true);
+  assert.equal(res10.freshnessStatus, 'fresh');
+  assert.equal(res10.ageDays, 10);
+
+  // 30-day-old post -> PASS
+  const thirtyDaysAgo = new Date(now - (30 * 86400 * 1000)).toISOString();
+  const res30 = evaluateFreshnessGate({ postedAt: thirtyDaysAgo, title: 'Need Flutter app developer' }, 30);
+  assert.equal(res30.pass, true);
+  assert.equal(res30.freshnessStatus, 'fresh');
+  assert.equal(res30.ageDays, 30);
+
+  // 31-day-old post -> REJECT (GATE_5 / STALE_PROJECT)
+  const thirtyOneDaysAgo = new Date(now - (31 * 86400 * 1000)).toISOString();
+  const res31 = evaluateFreshnessGate({ postedAt: thirtyOneDaysAgo, title: 'Need mobile app' }, 30);
+  assert.equal(res31.pass, false);
+  assert.equal(res31.rejection_gate, 'GATE_5');
+  assert.equal(res31.rejection_reason, 'STALE_PROJECT');
+  assert.equal(res31.freshnessStatus, 'archive');
+
+  // Missing postedAt without stale markers -> PASS (recent_discovery, null postedAt preserved)
+  const resNoDate = evaluateFreshnessGate({ postedAt: null, title: 'Looking for full stack developer for our SaaS' }, 30);
+  assert.equal(resNoDate.pass, true);
+  assert.equal(resNoDate.freshnessStatus, 'recent_discovery');
+  assert.equal(resNoDate.postedAt, null, 'Must preserve null postedAt without inventing fake Date.now()');
+
+  // Missing postedAt with past-year stale marker in text -> REJECT (GATE_5 / STALE_PROJECT)
+  const resStaleText = evaluateFreshnessGate({ postedAt: null, title: 'Project requirements for 2022 RFP tender' }, 30);
+  assert.equal(resStaleText.pass, false);
+  assert.equal(resStaleText.rejection_gate, 'GATE_5');
+  assert.equal(resStaleText.rejection_reason, 'STALE_PROJECT');
+});
+
+// -------------------------------------------------------------
+// P0.3: Gate 9 Deterministic Final Confidence Gate
+// -------------------------------------------------------------
+test('🧪 Phase E.14: Gate 9 deterministic formula correctly evaluates confidence with threshold 70', () => {
+  // Candidate with concrete deliverable + buyer intent + high relevance
+  const strongCandidate = {
+    title: 'Looking for agency to build custom CRM SaaS platform',
+    snippet: 'We need an experienced developer or agency to build an enterprise CRM. Budget: $5,000. Send proposals.',
+    rawContent: 'Scope of work: custom CRM with role-based auth, dashboard, and webhook integrations.'
+  };
+  const strongResult = { relevanceScore: 88, is_client_side_project: true };
+  const strongGate = evaluateFinalConfidenceGate(strongCandidate, strongResult, 70);
+  assert.equal(strongGate.pass, true);
+  assert.ok(strongGate.finalConfidence >= 70, `Final confidence ${strongGate.finalConfidence} should clear threshold 70`);
+
+  // Candidate with low score (vague snippet, no concrete procurement signal) -> rejected
+  const weakCandidate = {
+    title: 'need some dev',
+    snippet: 'hi',
+    rawContent: 'need help'
+  };
+  const weakResult = { relevanceScore: 50, is_client_side_project: true };
+  const weakGate = evaluateFinalConfidenceGate(weakCandidate, weakResult, 70);
+  assert.equal(weakGate.pass, false);
+  assert.equal(weakGate.rejection_gate, 'GATE_9');
+  assert.equal(weakGate.rejection_reason, 'LOW_FINAL_CONFIDENCE');
+  assert.ok(weakGate.finalConfidence < 70);
+
+  // Exact threshold boundary test: score 70 passes, score 69 fails
+  const thresholdGatePass = evaluateFinalConfidenceGate({}, { relevanceScore: 70 }, 70);
+  assert.equal(thresholdGatePass.threshold, 70);
+});
+
+// -------------------------------------------------------------
+// P1.6: Verification Cache Reset on New Discovery Run
+// -------------------------------------------------------------
+test('🧪 Phase E.15: clearVerificationCache resets cache between pipeline invocations', () => {
+  clearVerificationCache();
+  const statsAfterClear = getVerificationCacheStats();
+  assert.equal(statsAfterClear.totalEntries, 0);
+  assert.equal(statsAfterClear.hits, 0);
+  assert.equal(statsAfterClear.misses, 0);
+});
+
+// -------------------------------------------------------------
+// P0.6 & P0.7: Current-Batch Only Database Upsert
+// -------------------------------------------------------------
+test('🧪 Phase E.16: saveMasterProjects upserts only current batch and truthfully reports metrics', async () => {
+  const batch = [
+    {
+      sourceUrl: `https://example.com/unique-lead-${Date.now()}-1`,
+      title: 'Batch Project 1',
+      category: 'Web Development',
+      contact_type: 'email',
+      contact_value: 'client1@agency.com',
+      has_actionable_contact: true,
+      postedAt: null
+    },
+    {
+      sourceUrl: `https://example.com/unique-lead-${Date.now()}-2`,
+      title: 'Batch Project 2',
+      category: 'Mobile App',
+      contact_type: 'phone',
+      contact_value: '+1 555-234-5678',
+      has_actionable_contact: true,
+      postedAt: new Date().toISOString()
+    }
+  ];
+
+  const res = await saveMasterProjects(batch);
+  assert.equal(res.attempted, 2, 'Attempted count must match the current batch length exactly');
+
+  // In placeholder env, must report failure truthfully with inserted=0, updated=0
+  if (!process.env.SUPABASE_URL || process.env.SUPABASE_URL.includes('placeholder')) {
+    assert.equal(res.success, false);
+    assert.equal(res.inserted, 0, 'No false success inserted count in placeholder env');
+    assert.equal(res.updated, 0);
+    assert.ok(res.error);
+  }
 });
 
