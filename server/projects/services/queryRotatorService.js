@@ -1,9 +1,11 @@
 /**
- * LeadSpy Query Selection & Rotation Service (Layer 1 Engine)
+ * LeadSpy Query Selection & Rotation Service (Layer 1 Engine) - V2
  * File: server/projects/services/queryRotatorService.js
  * 
- * Manages query batching, rotation cycles, priority sorting,
- * deduplication, and query performance tracking.
+ * Supports:
+ * 1. Balanced Query Quotas across categories (Packs A-E)
+ * 2. Extended Query Metadata preservation through rotation
+ * 3. Adaptive query performance telemetry tracking
  */
 
 import { 
@@ -16,8 +18,8 @@ import {
   TARGET_PLATFORM_DOMAINS 
 } from '../config/projectQueryLibrary.js';
 
-// Global query performance telemetry store (Section 12)
-const QUERY_PERFORMANCE_METRICS = new Map();
+// Global query performance telemetry store
+let QUERY_PERFORMANCE_METRICS = new Map();
 
 export const ROTATION_CYCLES = {
   1: ['generic', 'website', 'software', 'mobileApp', 'saas', 'ai'],
@@ -31,7 +33,7 @@ export class QueryRotatorService {
       days: 30,
       batchSize: 20,
       cycle: 1,
-      categories: null, // null means use current rotation cycle categories
+      categories: null,
       siteFilter: null,
       location: null,
       ...config
@@ -39,7 +41,50 @@ export class QueryRotatorService {
   }
 
   /**
-   * Select and prioritize queries for the current cycle
+   * Static reset of performance telemetry for tests
+   */
+  static resetPerformanceMetrics() {
+    QUERY_PERFORMANCE_METRICS.clear();
+  }
+
+  /**
+   * Static telemetry recording method matching test suite
+   */
+  static recordQueryPerformance(record = {}) {
+    const q = record.query || 'unknown';
+    const current = QUERY_PERFORMANCE_METRICS.get(q) || {
+      query: q,
+      source: record.source || 'all',
+      rawResults: 0,
+      uniqueResults: 0,
+      qualifiedProjects: 0,
+      rejectedResults: 0,
+      contactableProjects: 0,
+      qualificationRate: 0
+    };
+
+    current.rawResults += record.resultsFound || record.rawResults || 0;
+    current.uniqueResults += record.uniqueResults || 0;
+    current.qualifiedProjects += record.qualifiedProjects || 0;
+    current.rejectedResults += record.rejectedResults || 0;
+    current.contactableProjects += record.contactableProjects || 0;
+
+    const denominator = current.uniqueResults || current.rawResults || 1;
+    current.qualificationRate = Number((current.qualifiedProjects / denominator).toFixed(2));
+
+    QUERY_PERFORMANCE_METRICS.set(q, current);
+  }
+
+  /**
+   * Static performance summary retrieval
+   */
+  static getPerformanceSummary() {
+    return Array.from(QUERY_PERFORMANCE_METRICS.values());
+  }
+
+  /**
+   * Balanced query selection preventing category monopolization
+   * Preserves extended metadata on every query object.
    */
   getQueriesForCycle(customOptions = {}) {
     const options = { ...this.config, ...customOptions };
@@ -49,18 +94,16 @@ export class QueryRotatorService {
 
     const candidateQueries = [];
 
-    // Mode: HIGH_INTENT (Task 9)
+    // Mode: HIGH_INTENT
     if (mode === DISCOVERY_MODE.HIGH_INTENT) {
       highIntentProjectQueries.forEach(q => candidateQueries.push({ ...q, category: 'high_intent' }));
     } else {
-      // Standard Categorized Mode: Determine target categories
       let targetCategories = options.categories;
       if (!targetCategories || targetCategories.length === 0) {
         const cycleKey = ((cycleNum - 1) % 3) + 1;
         targetCategories = ROTATION_CYCLES[cycleKey] || ROTATION_CYCLES[1];
       }
 
-      // Collect queries from selected categories
       for (const cat of targetCategories) {
         if (cat === 'industry') {
           const industryObj = projectQueryLibrary.industry || {};
@@ -75,108 +118,91 @@ export class QueryRotatorService {
       }
     }
 
-    // Append dynamic composed queries if needed
     if (options.includeDynamic) {
       const dynamicList = composeDynamicQueries(10);
       dynamicList.forEach(q => candidateQueries.push(q));
     }
 
-    // Sort strictly by Priority: HIGH > MEDIUM > LOW (Section 4)
-    const priorityWeight = {
-      [QUERY_PRIORITY.HIGH]: 3,
-      [QUERY_PRIORITY.MEDIUM]: 2,
-      [QUERY_PRIORITY.LOW]: 1
-    };
-
-    candidateQueries.sort((a, b) => {
-      const wA = priorityWeight[a.priority] || 1;
-      const wB = priorityWeight[b.priority] || 1;
-      return wB - wA;
-    });
-
-    // Deduplicate queries
-    const uniqueQueries = [];
+    // BALANCED SELECTION QUOTA
+    const selected = [];
     const seenQueries = new Set();
 
-    for (const item of candidateQueries) {
-      let finalQuery = item.query.trim();
-
-      // Apply location modifier if specified
-      if (options.location) {
-        finalQuery = `${finalQuery} in ${options.location}`;
+    function tryAdd(q) {
+      if (!seenQueries.has(q.query)) {
+        seenQueries.add(q.query);
+        selected.push(q);
+        return true;
       }
-
-      // Apply site filter if requested (Section 6)
-      if (options.siteFilter) {
-        finalQuery = applySiteFilter(finalQuery, options.siteFilter);
-      }
-
-      if (!seenQueries.has(finalQuery.toLowerCase())) {
-        seenQueries.add(finalQuery.toLowerCase());
-        uniqueQueries.push({
-          ...item,
-          query: finalQuery,
-          days: options.days || 30
-        });
-      }
-
-      if (uniqueQueries.length >= batchSize) break;
+      return false;
     }
 
-    return uniqueQueries;
-  }
+    // Sort candidates by priority and qualityTier
+    const tierWeight = { 'A': 3, 'B': 2, 'C': 1 };
+    const priorityWeight = { [QUERY_PRIORITY.HIGH]: 3, [QUERY_PRIORITY.MEDIUM]: 2, [QUERY_PRIORITY.LOW]: 1 };
 
-  /**
-   * Record query execution and performance metrics (Section 12)
-   */
-  static recordQueryPerformance({
-    query,
-    source,
-    resultsFound = 0,
-    uniqueResults = 0,
-    qualifiedProjects = 0,
-    rejectedResults = 0,
-    contactableProjects = 0
-  }) {
-    const existing = QUERY_PERFORMANCE_METRICS.get(query) || {
-      query,
-      source,
-      searchCount: 0,
-      totalResultsFound: 0,
-      totalUniqueResults: 0,
-      totalQualifiedProjects: 0,
-      totalRejectedResults: 0,
-      totalContactableProjects: 0,
-      lastSearchTimestamp: new Date().toISOString()
+    candidateQueries.sort((a, b) => {
+      const pDiff = (priorityWeight[b.priority] || 1) - (priorityWeight[a.priority] || 1);
+      if (pDiff !== 0) return pDiff;
+      return (tierWeight[b.qualityTier] || 1) - (tierWeight[a.qualityTier] || 1);
+    });
+
+    // Group candidates into balanced quota buckets
+    const buckets = {
+      buyer_request: candidateQueries.filter(q => q.intentType === 'buyer_request' || q.intentType === 'outsourcing'),
+      business_problem: candidateQueries.filter(q => q.intentType === 'business_problem' || q.intentType === 'company_request'),
+      deliverable: candidateQueries.filter(q => q.priority === QUERY_PRIORITY.HIGH && !['rfp', 'maintenance'].includes(q.intentType)),
+      rfp: candidateQueries.filter(q => q.intentType === 'rfp' || q.intentType === 'project_requirement'),
+      maintenance: candidateQueries.filter(q => q.intentType === 'maintenance')
     };
 
-    existing.searchCount += 1;
-    existing.totalResultsFound += resultsFound;
-    existing.totalUniqueResults += uniqueResults;
-    existing.totalQualifiedProjects += qualifiedProjects;
-    existing.totalRejectedResults += rejectedResults;
-    existing.totalContactableProjects += contactableProjects;
-    existing.lastSearchTimestamp = new Date().toISOString();
+    const quotaPerBucket = Math.max(2, Math.floor(batchSize / 5));
 
-    existing.qualificationRate = existing.totalUniqueResults > 0 
-      ? Number((existing.totalQualifiedProjects / existing.totalUniqueResults).toFixed(3))
-      : 0;
+    for (const key of Object.keys(buckets)) {
+      let count = 0;
+      for (const q of buckets[key]) {
+        if (tryAdd(q)) {
+          count++;
+          if (count >= quotaPerBucket) break;
+        }
+      }
+    }
 
-    QUERY_PERFORMANCE_METRICS.set(query, existing);
-    return existing;
+    for (const q of candidateQueries) {
+      if (selected.length >= batchSize) break;
+      if (q.priority !== QUERY_PRIORITY.LOW) {
+        tryAdd(q);
+      }
+    }
+
+    const finalQueries = selected.slice(0, batchSize).map(q => {
+      let qStr = q.query;
+      if (options.siteFilter) {
+        qStr = applySiteFilter(qStr, options.siteFilter);
+      }
+      if (options.location) {
+        qStr = `${qStr} "${options.location}"`;
+      }
+      return {
+        ...q,
+        query: qStr
+      };
+    });
+
+    return finalQueries;
   }
 
-  /**
-   * Get telemetry summary of all tracked queries
-   */
-  static getPerformanceSummary() {
-    return Array.from(QUERY_PERFORMANCE_METRICS.values()).sort((a, b) => b.totalQualifiedProjects - a.totalQualifiedProjects);
+  recordQueryPerformance(queryStr, stats = {}) {
+    QueryRotatorService.recordQueryPerformance({
+      query: queryStr,
+      resultsFound: stats.rawResults,
+      uniqueResults: stats.uniqueResults,
+      qualifiedProjects: stats.qualified,
+      contactableProjects: stats.contactable,
+      rejectedResults: stats.rejected
+    });
   }
 
-  /**
-   * Reset performance metrics (for testing)
-   */
-  static resetPerformanceMetrics() {
-    QUERY_PERFORMANCE_METRICS.clear();
+  getQueryTelemetry() {
+    return QueryRotatorService.getPerformanceSummary();
   }
 }

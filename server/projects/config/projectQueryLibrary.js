@@ -1,9 +1,12 @@
 /**
- * LeadSpy Central IT Project Discovery Query Library
+ * LeadSpy Central IT Project Discovery Query Library - V2
  * File: server/projects/config/projectQueryLibrary.js
  * 
- * Single Source of Truth for all Search & Discovery queries.
- * DO NOT duplicate search strings in other files.
+ * Supports:
+ * 1. Extended Query Metadata Model (intentType, deliverableType, sourceScope, qualityTier, negativeTerms, allowedDomains)
+ * 2. 5 Dedicated High-Intent Query Packs (A-E)
+ * 3. Demoted Broad Queries (LOW priority probe status)
+ * 4. Source-specific queries and negative operators
  */
 
 export const QUERY_PRIORITY = {
@@ -17,286 +20,282 @@ export const DISCOVERY_MODE = {
   HIGH_INTENT: 'high_intent'
 };
 
-/**
- * Task 9: Dedicated High-Intent Project Discovery Queries
- * Prioritizes direct buyer/client phrases without replacing the complete library.
- */
-export const highIntentProjectQueries = [
-  { query: 'need someone to build', priority: QUERY_PRIORITY.HIGH },
-  { query: 'looking for development agency', priority: QUERY_PRIORITY.HIGH },
-  { query: 'need a development team', priority: QUERY_PRIORITY.HIGH },
-  { query: 'need custom software', priority: QUERY_PRIORITY.HIGH },
-  { query: 'need website development', priority: QUERY_PRIORITY.HIGH },
-  { query: 'need mobile app development', priority: QUERY_PRIORITY.HIGH },
-  { query: 'need SaaS development', priority: QUERY_PRIORITY.HIGH },
-  { query: 'need MVP development', priority: QUERY_PRIORITY.HIGH },
-  { query: 'need AI development', priority: QUERY_PRIORITY.HIGH },
-  { query: 'need AI agent development', priority: QUERY_PRIORITY.HIGH },
-  { query: 'looking for software development agency', priority: QUERY_PRIORITY.HIGH },
-  { query: 'looking for technology partner', priority: QUERY_PRIORITY.HIGH },
-  { query: 'need someone to develop', priority: QUERY_PRIORITY.HIGH },
-  { query: 'looking for someone to build', priority: QUERY_PRIORITY.HIGH },
-  { query: 'need an app built', priority: QUERY_PRIORITY.HIGH },
-  { query: 'need software built', priority: QUERY_PRIORITY.HIGH },
-  { query: 'need a platform built', priority: QUERY_PRIORITY.HIGH }
+export const DEFAULT_NEGATIVE_TERMS = [
+  '-job', '-jobs', '-careers', '-salary', '-resume', '-internship',
+  '-course', '-tutorial', '-dictionary', '-wikipedia', '-definition'
 ];
 
 /**
- * Categorized Master Project Query Library
- * Similar wordings are intentional to maximize search engine result variety.
+ * Helper to construct normalized query objects with extended metadata
+ */
+function createQuery(query, opts = {}) {
+  return {
+    query,
+    priority: opts.priority || QUERY_PRIORITY.HIGH,
+    intentType: opts.intentType || 'buyer_request',
+    deliverableType: opts.deliverableType || 'custom_software',
+    sourceScope: opts.sourceScope || 'public_web',
+    qualityTier: opts.qualityTier || 'A',
+    negativeTerms: opts.negativeTerms || DEFAULT_NEGATIVE_TERMS,
+    allowedDomains: opts.allowedDomains || null,
+    category: opts.category || 'generic'
+  };
+}
+
+/**
+ * Dedicated High-Intent Project Discovery Queries (Packs A - E)
+ */
+export const highIntentProjectQueries = [
+  // PACK A — Direct Buyer Intent
+  createQuery('looking for development agency web application', { intentType: 'outsourcing', deliverableType: 'web_app', qualityTier: 'A' }),
+  createQuery('need someone to build SaaS', { intentType: 'buyer_request', deliverableType: 'saas', qualityTier: 'A' }),
+  createQuery('looking to outsource software development', { intentType: 'outsourcing', deliverableType: 'custom_software', qualityTier: 'A' }),
+  createQuery('seeking software development agency', { intentType: 'outsourcing', deliverableType: 'custom_software', qualityTier: 'A' }),
+  createQuery('looking for development team MVP', { intentType: 'buyer_request', deliverableType: 'saas', qualityTier: 'A' }),
+  createQuery('need custom software developed', { intentType: 'buyer_request', deliverableType: 'custom_software', qualityTier: 'A' }),
+  createQuery('looking for software development company', { intentType: 'outsourcing', deliverableType: 'custom_software', qualityTier: 'A' }),
+  createQuery('need technology partner', { intentType: 'company_request', deliverableType: 'custom_software', qualityTier: 'A' }),
+
+  // PACK B — Project / Procurement
+  createQuery('request for proposal software development', { intentType: 'rfp', deliverableType: 'custom_software', qualityTier: 'A' }),
+  createQuery('RFP web application', { intentType: 'rfp', deliverableType: 'web_app', qualityTier: 'A' }),
+  createQuery('scope of work custom software', { intentType: 'project_requirement', deliverableType: 'custom_software', qualityTier: 'A' }),
+  createQuery('fixed price project developer', { intentType: 'project_requirement', deliverableType: 'custom_software', qualityTier: 'A' }),
+  createQuery('send proposal mobile app development', { intentType: 'rfp', deliverableType: 'mobile_app', qualityTier: 'A' }),
+  createQuery('software development project proposal', { intentType: 'rfp', deliverableType: 'custom_software', qualityTier: 'A' }),
+
+  // PACK C — Business Requirements
+  createQuery('need CRM for our business', { intentType: 'business_problem', deliverableType: 'crm', qualityTier: 'A' }),
+  createQuery('need customer portal built', { intentType: 'business_problem', deliverableType: 'web_app', qualityTier: 'A' }),
+  createQuery('need booking system developed', { intentType: 'business_problem', deliverableType: 'booking', qualityTier: 'A' }),
+  createQuery('need property management software built', { intentType: 'business_problem', deliverableType: 'custom_software', qualityTier: 'A' }),
+  createQuery('need inventory management software', { intentType: 'business_problem', deliverableType: 'erp', qualityTier: 'A' }),
+  createQuery('need internal dashboard', { intentType: 'business_problem', deliverableType: 'web_app', qualityTier: 'A' }),
+
+  // PACK D — Deliverable Specific
+  createQuery('need web application built', { intentType: 'buyer_request', deliverableType: 'web_app', qualityTier: 'B' }),
+  createQuery('need mobile app developed', { intentType: 'buyer_request', deliverableType: 'mobile_app', qualityTier: 'B' }),
+  createQuery('need SaaS platform built', { intentType: 'buyer_request', deliverableType: 'saas', qualityTier: 'B' }),
+  createQuery('need AI agent developed', { intentType: 'buyer_request', deliverableType: 'ai', qualityTier: 'B' }),
+  createQuery('need automation system built', { intentType: 'buyer_request', deliverableType: 'automation', qualityTier: 'B' }),
+  createQuery('need API integration', { intentType: 'buyer_request', deliverableType: 'api', qualityTier: 'B' }),
+  createQuery('need custom WordPress development', { intentType: 'buyer_request', deliverableType: 'website', qualityTier: 'B' }),
+  createQuery('need Shopify app developed', { intentType: 'buyer_request', deliverableType: 'ecommerce', qualityTier: 'B' }),
+
+  // PACK E — Maintenance / Existing Projects
+  createQuery('need website redesign', { intentType: 'maintenance', deliverableType: 'website', qualityTier: 'B' }),
+  createQuery('need web app maintenance', { intentType: 'maintenance', deliverableType: 'web_app', qualityTier: 'B' }),
+  createQuery('need developer to fix production app', { intentType: 'maintenance', deliverableType: 'custom_software', qualityTier: 'B' }),
+  createQuery('looking for agency to maintain software', { intentType: 'maintenance', deliverableType: 'custom_software', qualityTier: 'B' })
+];
+
+/**
+ * Categorized Master Project Query Library with Extended Metadata
  */
 export const projectQueryLibrary = {
   // 1. Generic High-Intent Client Queries
   generic: [
-    { query: 'need someone to build a website', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for someone to build a website', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need someone to build an app', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for someone to build an app', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need someone to build a platform', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for someone to build a platform', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need someone to build our platform', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need someone to build an MVP', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for someone to build an MVP', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need someone to develop software', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for developer', priority: QUERY_PRIORITY.MEDIUM },
-    { query: 'need developer', priority: QUERY_PRIORITY.MEDIUM },
-    { query: 'developer', priority: QUERY_PRIORITY.LOW }
+    createQuery('need someone to build a website', { intentType: 'buyer_request', deliverableType: 'website', qualityTier: 'A' }),
+    createQuery('looking for someone to build a website', { intentType: 'buyer_request', deliverableType: 'website', qualityTier: 'A' }),
+    createQuery('need someone to build an app', { intentType: 'buyer_request', deliverableType: 'mobile_app', qualityTier: 'A' }),
+    createQuery('looking for someone to build an app', { intentType: 'buyer_request', deliverableType: 'mobile_app', qualityTier: 'A' }),
+    createQuery('need someone to build a platform', { intentType: 'buyer_request', deliverableType: 'saas', qualityTier: 'A' }),
+    createQuery('looking for someone to build a platform', { intentType: 'buyer_request', deliverableType: 'saas', qualityTier: 'A' }),
+    createQuery('need someone to build our platform', { intentType: 'buyer_request', deliverableType: 'saas', qualityTier: 'A' }),
+    createQuery('need someone to build an MVP', { intentType: 'buyer_request', deliverableType: 'saas', qualityTier: 'A' }),
+    createQuery('looking for someone to build an MVP', { intentType: 'buyer_request', deliverableType: 'saas', qualityTier: 'A' }),
+    createQuery('need someone to develop software', { intentType: 'buyer_request', deliverableType: 'custom_software', qualityTier: 'A' }),
+    createQuery('looking for developer', { priority: QUERY_PRIORITY.MEDIUM, qualityTier: 'B' }),
+    createQuery('need developer', { priority: QUERY_PRIORITY.MEDIUM, qualityTier: 'B' }),
+    createQuery('developer', { priority: QUERY_PRIORITY.LOW, qualityTier: 'C' }) // Demoted probe query
   ],
 
   // 2. Custom Software Development
   software: [
-    { query: 'need custom software', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need custom software development', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for custom software development agency', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for software development agency', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for software development company', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need software developed for our business', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for software development team', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need software development partner', priority: QUERY_PRIORITY.HIGH },
-    { query: 'planning to build custom software', priority: QUERY_PRIORITY.MEDIUM },
-    { query: 'software development project', priority: QUERY_PRIORITY.MEDIUM },
-    { query: 'software development', priority: QUERY_PRIORITY.LOW }
+    createQuery('need custom software', { intentType: 'buyer_request', deliverableType: 'custom_software', qualityTier: 'A' }),
+    createQuery('need custom software development', { intentType: 'buyer_request', deliverableType: 'custom_software', qualityTier: 'A' }),
+    createQuery('looking for custom software development agency', { intentType: 'outsourcing', deliverableType: 'custom_software', qualityTier: 'A' }),
+    createQuery('looking for software development agency', { intentType: 'outsourcing', deliverableType: 'custom_software', qualityTier: 'A' }),
+    createQuery('looking for software development company', { intentType: 'outsourcing', deliverableType: 'custom_software', qualityTier: 'A' }),
+    createQuery('need software developed for our business', { intentType: 'business_problem', deliverableType: 'custom_software', qualityTier: 'A' }),
+    createQuery('looking for software development team', { intentType: 'outsourcing', deliverableType: 'custom_software', qualityTier: 'A' }),
+    createQuery('need software development partner', { intentType: 'company_request', deliverableType: 'custom_software', qualityTier: 'A' }),
+    createQuery('planning to build custom software', { priority: QUERY_PRIORITY.MEDIUM, qualityTier: 'B' }),
+    createQuery('software development project', { priority: QUERY_PRIORITY.MEDIUM, qualityTier: 'B' }),
+    createQuery('software development', { priority: QUERY_PRIORITY.LOW, qualityTier: 'C' }) // Demoted probe query
   ],
 
   // 3. Website & Web Applications
   website: [
-    { query: 'need a website', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need a website built', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for web development agency', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for web development company', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need web application developed', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for agency to build website', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need a modern web application', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need full stack web developer for project', priority: QUERY_PRIORITY.HIGH },
-    { query: 'planning to build a website', priority: QUERY_PRIORITY.MEDIUM },
-    { query: 'web development project', priority: QUERY_PRIORITY.MEDIUM },
-    { query: 'website project', priority: QUERY_PRIORITY.MEDIUM },
-    { query: 'website', priority: QUERY_PRIORITY.LOW }
+    createQuery('need a website', { intentType: 'buyer_request', deliverableType: 'website', qualityTier: 'A' }),
+    createQuery('need a website built', { intentType: 'buyer_request', deliverableType: 'website', qualityTier: 'A' }),
+    createQuery('looking for web development agency', { intentType: 'outsourcing', deliverableType: 'website', qualityTier: 'A' }),
+    createQuery('looking for web development company', { intentType: 'outsourcing', deliverableType: 'website', qualityTier: 'A' }),
+    createQuery('need web application developed', { intentType: 'buyer_request', deliverableType: 'web_app', qualityTier: 'A' }),
+    createQuery('looking for agency to build website', { intentType: 'outsourcing', deliverableType: 'website', qualityTier: 'A' }),
+    createQuery('need a modern web application', { intentType: 'buyer_request', deliverableType: 'web_app', qualityTier: 'A' }),
+    createQuery('need full stack web developer for project', { intentType: 'project_requirement', deliverableType: 'web_app', qualityTier: 'A' }),
+    createQuery('planning to build a website', { priority: QUERY_PRIORITY.MEDIUM, qualityTier: 'B' }),
+    createQuery('web development project', { priority: QUERY_PRIORITY.MEDIUM, qualityTier: 'B' }),
+    createQuery('website project', { priority: QUERY_PRIORITY.MEDIUM, qualityTier: 'B' }),
+    createQuery('website', { priority: QUERY_PRIORITY.LOW, qualityTier: 'C' }) // Demoted probe query
   ],
 
   // 4. Mobile Apps (iOS, Android, Cross-platform)
   mobileApp: [
-    { query: 'need mobile app development', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for mobile app development agency', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need iOS and Android app developed', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for Flutter developer for mobile app', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need React Native app developed', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need mobile app built from scratch', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for mobile app development company', priority: QUERY_PRIORITY.HIGH },
-    { query: 'planning to build an app', priority: QUERY_PRIORITY.MEDIUM },
-    { query: 'mobile app project', priority: QUERY_PRIORITY.MEDIUM },
-    { query: 'mobile application', priority: QUERY_PRIORITY.LOW }
+    createQuery('need mobile app development', { intentType: 'buyer_request', deliverableType: 'mobile_app', qualityTier: 'A' }),
+    createQuery('looking for mobile app development agency', { intentType: 'outsourcing', deliverableType: 'mobile_app', qualityTier: 'A' }),
+    createQuery('need an app built for our business', { intentType: 'business_problem', deliverableType: 'mobile_app', qualityTier: 'A' }),
+    createQuery('looking for iOS app developer for project', { intentType: 'project_requirement', deliverableType: 'mobile_app', qualityTier: 'A' }),
+    createQuery('looking for Flutter developer to build app', { intentType: 'project_requirement', deliverableType: 'mobile_app', qualityTier: 'A' }),
+    createQuery('need React Native app built', { intentType: 'buyer_request', deliverableType: 'mobile_app', qualityTier: 'A' }),
+    createQuery('mobile application project', { priority: QUERY_PRIORITY.MEDIUM, qualityTier: 'B' }),
+    createQuery('mobile application', { priority: QUERY_PRIORITY.LOW, qualityTier: 'C' })
   ],
 
-  // 5. SaaS Platforms & MVPs
+  // 5. SaaS Platforms & MVP
   saas: [
-    { query: 'need someone to build a SaaS', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need SaaS development', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for agency to build SaaS platform', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need B2B SaaS platform built', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for development team for SaaS MVP', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need micro-SaaS built', priority: QUERY_PRIORITY.HIGH },
-    { query: 'planning to build a SaaS', priority: QUERY_PRIORITY.MEDIUM },
-    { query: 'SaaS development project', priority: QUERY_PRIORITY.MEDIUM },
-    { query: 'SaaS platform', priority: QUERY_PRIORITY.LOW }
+    createQuery('need SaaS platform built', { intentType: 'buyer_request', deliverableType: 'saas', qualityTier: 'A' }),
+    createQuery('looking for agency to build SaaS MVP', { intentType: 'outsourcing', deliverableType: 'saas', qualityTier: 'A' }),
+    createQuery('need development team to build MVP', { intentType: 'outsourcing', deliverableType: 'saas', qualityTier: 'A' }),
+    createQuery('seeking developers for micro SaaS', { intentType: 'project_requirement', deliverableType: 'saas', qualityTier: 'A' }),
+    createQuery('SaaS development project', { priority: QUERY_PRIORITY.MEDIUM, qualityTier: 'B' }),
+    createQuery('SaaS platform', { priority: QUERY_PRIORITY.LOW, qualityTier: 'C' })
   ],
 
-  // 6. E-Commerce & Online Stores
+  // 6. E-Commerce
   ecommerce: [
-    { query: 'need custom ecommerce store developed', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for ecommerce development agency', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need online shopping portal built', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need multi-vendor marketplace developed', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for agency to build ecommerce platform', priority: QUERY_PRIORITY.HIGH },
-    { query: 'ecommerce website project', priority: QUERY_PRIORITY.MEDIUM },
-    { query: 'online store development', priority: QUERY_PRIORITY.MEDIUM }
+    createQuery('need ecommerce website built', { intentType: 'buyer_request', deliverableType: 'ecommerce', qualityTier: 'A' }),
+    createQuery('looking for Shopify expert to build store', { intentType: 'project_requirement', deliverableType: 'ecommerce', qualityTier: 'A' }),
+    createQuery('need custom WooCommerce development', { intentType: 'buyer_request', deliverableType: 'ecommerce', qualityTier: 'A' }),
+    createQuery('need marketplace website developed', { intentType: 'buyer_request', deliverableType: 'ecommerce', qualityTier: 'A' }),
+    createQuery('ecommerce development project', { priority: QUERY_PRIORITY.MEDIUM, qualityTier: 'B' })
   ],
 
-  // 7. Artificial Intelligence & ML
+  // 7. AI & Intelligent Automation
   ai: [
-    { query: 'need AI development', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for AI development agency', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need AI agent development', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need custom LLM application developed', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for agency to build AI chatbot', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need voice AI agent built', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for AI/ML engineering team', priority: QUERY_PRIORITY.HIGH },
-    { query: 'AI application project', priority: QUERY_PRIORITY.MEDIUM },
-    { query: 'AI development', priority: QUERY_PRIORITY.LOW }
+    createQuery('need AI agent developed', { intentType: 'buyer_request', deliverableType: 'ai', qualityTier: 'A' }),
+    createQuery('looking for agency to build AI chatbot', { intentType: 'outsourcing', deliverableType: 'ai', qualityTier: 'A' }),
+    createQuery('need custom LLM application built', { intentType: 'buyer_request', deliverableType: 'ai', qualityTier: 'A' }),
+    createQuery('need LangChain developer for project', { intentType: 'project_requirement', deliverableType: 'ai', qualityTier: 'A' }),
+    createQuery('AI application project', { priority: QUERY_PRIORITY.MEDIUM, qualityTier: 'B' }),
+    createQuery('AI development', { priority: QUERY_PRIORITY.LOW, qualityTier: 'C' })
   ],
 
-  // 8. Workflow Automation & Integration
+  // 8. Workflow Automation
   automation: [
-    { query: 'need automation development', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need workflow automation built', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for agency for business process automation', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need Python automation script and dashboard', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need RPA automation developed', priority: QUERY_PRIORITY.HIGH },
-    { query: 'automation project', priority: QUERY_PRIORITY.MEDIUM }
+    createQuery('need workflow automation built', { intentType: 'business_problem', deliverableType: 'automation', qualityTier: 'A' }),
+    createQuery('need web scraping automation developed', { intentType: 'buyer_request', deliverableType: 'automation', qualityTier: 'A' }),
+    createQuery('need Zapier Make automation consultant', { intentType: 'project_requirement', deliverableType: 'automation', qualityTier: 'A' })
   ],
 
-  // 9. CRM & ERP Systems
+  // 9. CRM & ERP Business Systems
   crmErp: [
-    { query: 'need custom CRM development', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for agency to build custom ERP', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need customer portal and CRM built', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need inventory management system developed', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for developer for internal ERP system', priority: QUERY_PRIORITY.HIGH },
-    { query: 'CRM development project', priority: QUERY_PRIORITY.MEDIUM }
+    createQuery('need custom CRM developed', { intentType: 'business_problem', deliverableType: 'crm', qualityTier: 'A' }),
+    createQuery('need ERP system built for business', { intentType: 'business_problem', deliverableType: 'erp', qualityTier: 'A' }),
+    createQuery('looking for developer to build dashboard', { intentType: 'project_requirement', deliverableType: 'web_app', qualityTier: 'A' })
   ],
 
-  // 10. API Development & Third-Party Integration
+  // 10. API & System Integrations
   apiIntegration: [
-    { query: 'need API integration developer', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need payment gateway integration developed', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for agency to build RESTful API backend', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need custom API development and webhook sync', priority: QUERY_PRIORITY.HIGH },
-    { query: 'API integration project', priority: QUERY_PRIORITY.MEDIUM }
+    createQuery('need API integration developer', { intentType: 'buyer_request', deliverableType: 'api', qualityTier: 'A' }),
+    createQuery('need developer to connect third party API', { intentType: 'project_requirement', deliverableType: 'api', qualityTier: 'A' }),
+    createQuery('need payment gateway integrated', { intentType: 'buyer_request', deliverableType: 'api', qualityTier: 'A' })
   ],
 
-  // 11. WordPress & CMS Solutions
+  // 11. CMS & Specialized Platforms
   wordpress: [
-    { query: 'need custom WordPress website built', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for WordPress development agency', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need custom WordPress theme and plugin development', priority: QUERY_PRIORITY.HIGH },
-    { query: 'WordPress development project', priority: QUERY_PRIORITY.MEDIUM }
+    createQuery('need custom WordPress plugin developed', { intentType: 'buyer_request', deliverableType: 'website', qualityTier: 'A' }),
+    createQuery('need WordPress developer to rebuild website', { intentType: 'maintenance', deliverableType: 'website', qualityTier: 'A' })
   ],
-
-  // 12. Shopify Store & Apps
   shopify: [
-    { query: 'need Shopify expert to build store', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for Shopify development agency', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need custom Shopify app developed', priority: QUERY_PRIORITY.HIGH },
-    { query: 'Shopify store development', priority: QUERY_PRIORITY.MEDIUM }
+    createQuery('need custom Shopify app built', { intentType: 'buyer_request', deliverableType: 'ecommerce', qualityTier: 'A' }),
+    createQuery('need developer to customize Shopify theme', { intentType: 'maintenance', deliverableType: 'ecommerce', qualityTier: 'A' })
   ],
 
-  // 13. Startup MVP Building
+  // 12. Startup MVP Development
   mvp: [
-    { query: 'need MVP development', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for agency to build MVP', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need someone to build startup MVP', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need rapid prototype and MVP development', priority: QUERY_PRIORITY.HIGH },
-    { query: 'startup MVP project', priority: QUERY_PRIORITY.MEDIUM }
+    createQuery('need MVP developed for startup', { intentType: 'buyer_request', deliverableType: 'saas', qualityTier: 'A' }),
+    createQuery('looking for technical partner to build MVP', { intentType: 'company_request', deliverableType: 'saas', qualityTier: 'A' })
   ],
 
-  // 14. Redesign & Maintenance
+  // 13. Maintenance, Revamps & Bug Fixes
   maintenance: [
-    { query: 'need website redesign', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for agency to revamp our website', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need ongoing website maintenance partner', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need bug fixing and maintenance for web app', priority: QUERY_PRIORITY.HIGH },
-    { query: 'website redesign project', priority: QUERY_PRIORITY.MEDIUM }
+    createQuery('need developer to fix bugs in web app', { intentType: 'maintenance', deliverableType: 'web_app', qualityTier: 'A' }),
+    createQuery('need website maintenance and updates', { intentType: 'maintenance', deliverableType: 'website', qualityTier: 'A' }),
+    createQuery('need agency to take over web project', { intentType: 'maintenance', deliverableType: 'custom_software', qualityTier: 'A' })
   ],
 
-  // 15. Agency Outsourcing & Dedicated Teams
+  // 14. Agency & Outsourcing Direct Requests
   agencyOutsourcing: [
-    { query: 'looking for web development agency', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for software development agency', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need a development team', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for development team', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking for technology partner', priority: QUERY_PRIORITY.HIGH },
-    { query: 'looking to outsource software development project', priority: QUERY_PRIORITY.HIGH },
-    { query: 'RFP software development agency', priority: QUERY_PRIORITY.HIGH }
+    createQuery('looking to outsource web development', { intentType: 'outsourcing', deliverableType: 'website', qualityTier: 'A' }),
+    createQuery('need external development team for project', { intentType: 'outsourcing', deliverableType: 'custom_software', qualityTier: 'A' }),
+    createQuery('seeking development agency for contract', { intentType: 'outsourcing', deliverableType: 'custom_software', qualityTier: 'A' })
   ],
 
-  // 16. Company Project Intent
+  // 15. Explicit Business/Company Needs
   companyIntent: [
-    { query: 'our company is looking for a development agency', priority: QUERY_PRIORITY.HIGH },
-    { query: 'our startup needs a development team', priority: QUERY_PRIORITY.HIGH },
-    { query: 'seeking external software development agency', priority: QUERY_PRIORITY.HIGH },
-    { query: 'hiring software development agency for upcoming project', priority: QUERY_PRIORITY.HIGH },
-    { query: 'request for proposal software development', priority: QUERY_PRIORITY.HIGH }
+    createQuery('our company needs a website built', { intentType: 'company_request', deliverableType: 'website', qualityTier: 'A' }),
+    createQuery('our business needs a mobile app', { intentType: 'company_request', deliverableType: 'mobile_app', qualityTier: 'A' })
   ],
 
-  // 17. Project Intent Keywords
+  // 16. Explicit Project Requirement Language
   projectIntent: [
-    { query: 'scope of work software development project', priority: QUERY_PRIORITY.HIGH },
-    { query: 'project requirements document web application', priority: QUERY_PRIORITY.HIGH },
-    { query: 'fixed price software development project', priority: QUERY_PRIORITY.HIGH },
-    { query: 'contract software development project', priority: QUERY_PRIORITY.HIGH }
+    createQuery('scope of work for web application', { intentType: 'project_requirement', deliverableType: 'web_app', qualityTier: 'A' }),
+    createQuery('RFP web development', { intentType: 'rfp', deliverableType: 'website', qualityTier: 'A' })
   ],
 
-  // 18. Industry-Specific Client Opportunities
+  // 17. Industry-Specific Projects
   industry: {
     realEstate: [
-      { query: 'need real estate website with MLS integration', priority: QUERY_PRIORITY.HIGH },
-      { query: 'looking for agency to build real estate portal', priority: QUERY_PRIORITY.HIGH },
-      { query: 'need property listing mobile app developed', priority: QUERY_PRIORITY.HIGH }
+      createQuery('need real estate website developed', { intentType: 'business_problem', deliverableType: 'website', qualityTier: 'A' })
     ],
     healthcare: [
-      { query: 'need healthcare portal and appointment booking system', priority: QUERY_PRIORITY.HIGH },
-      { query: 'looking for agency to develop clinic management software', priority: QUERY_PRIORITY.HIGH },
-      { query: 'need telemedicine mobile application built', priority: QUERY_PRIORITY.HIGH }
+      createQuery('need clinic appointment booking system', { intentType: 'business_problem', deliverableType: 'booking', qualityTier: 'A' })
     ],
     education: [
-      { query: 'need custom LMS learning management system built', priority: QUERY_PRIORITY.HIGH },
-      { query: 'looking for agency to develop edtech platform', priority: QUERY_PRIORITY.HIGH },
-      { query: 'need student portal and course website developed', priority: QUERY_PRIORITY.HIGH }
+      createQuery('need learning management system portal', { intentType: 'business_problem', deliverableType: 'web_app', qualityTier: 'A' })
     ],
     hospitality: [
-      { query: 'need hotel booking and reservation website built', priority: QUERY_PRIORITY.HIGH },
-      { query: 'looking for agency to develop restaurant ordering system', priority: QUERY_PRIORITY.HIGH }
+      createQuery('need hotel booking engine developed', { intentType: 'business_problem', deliverableType: 'booking', qualityTier: 'A' })
     ],
     finance: [
-      { query: 'need fintech dashboard and payment portal built', priority: QUERY_PRIORITY.HIGH },
-      { query: 'looking for agency to develop investment platform', priority: QUERY_PRIORITY.HIGH }
+      createQuery('need fintech loan calculator dashboard', { intentType: 'business_problem', deliverableType: 'web_app', qualityTier: 'A' })
     ]
   },
 
-  // 19. Natural Language Client Expressions
+  // 18. Natural Conversational Queries
   naturalLanguage: [
-    { query: 'can anyone recommend a good web development agency', priority: QUERY_PRIORITY.HIGH },
-    { query: 'who can build our startup MVP', priority: QUERY_PRIORITY.HIGH },
-    { query: 'where can I hire a reliable development team for a project', priority: QUERY_PRIORITY.HIGH },
-    { query: 'need someone to take over our web development project', priority: QUERY_PRIORITY.HIGH }
+    createQuery('can someone build a website for me', { intentType: 'buyer_request', deliverableType: 'website', qualityTier: 'A' }),
+    createQuery('who can build a mobile app for our business', { intentType: 'buyer_request', deliverableType: 'mobile_app', qualityTier: 'A' })
   ],
 
-  // 20. Budgeted Intent Signals
+  // 19. Budget & Payment Signaled Queries
   budget: [
-    { query: 'budget $5000 to build website', priority: QUERY_PRIORITY.HIGH },
-    { query: 'budget $10000 custom software development', priority: QUERY_PRIORITY.HIGH },
-    { query: 'fixed price contract web application', priority: QUERY_PRIORITY.HIGH }
+    createQuery('budget for custom web development project', { intentType: 'project_requirement', deliverableType: 'web_app', qualityTier: 'A' }),
+    createQuery('fixed budget to develop web app', { intentType: 'project_requirement', deliverableType: 'web_app', qualityTier: 'A' })
   ],
 
-  // 21. Contact Direct Signals
+  // 20. Direct Contact Intent
   contact: [
-    { query: 'send portfolio and quote web development', priority: QUERY_PRIORITY.HIGH },
-    { query: 'send proposal for software development project', priority: QUERY_PRIORITY.HIGH },
-    { query: 'email proposals to software project', priority: QUERY_PRIORITY.HIGH }
+    createQuery('contact developer to build software', { intentType: 'buyer_request', deliverableType: 'custom_software', qualityTier: 'A' }),
+    createQuery('contact agency to develop app', { intentType: 'outsourcing', deliverableType: 'mobile_app', qualityTier: 'A' })
   ]
 };
 
 // ----------------------------------------------------
-// DYNAMIC QUERY COMPOSITION GRAMMAR (Section 5)
+// DYNAMIC QUERY GENERATION ENGINE (Section 5)
 // ----------------------------------------------------
 export const QUERY_COMPONENTS = {
   INTENTS: [
-    'need',
-    'looking for',
-    'searching for',
-    'want',
-    'planning to',
-    'seeking'
+    'need someone to build',
+    'looking for someone to build',
+    'need a team to build',
+    'looking for agency to build',
+    'need developer to build',
+    'hiring agency to build',
+    'looking to outsource',
+    'need custom'
   ],
   DELIVERABLES: [
     'website',
@@ -322,49 +321,27 @@ export const QUERY_COMPONENTS = {
     'software company',
     'technology partner',
     'outsourcing company'
-  ],
-  MODIFIERS: [
-    'custom',
-    'new',
-    'from scratch',
-    'redesign',
-    'development',
-    'build',
-    'implementation'
   ]
 };
 
-/**
- * Generate sensible dynamic queries based on grammar combinations
- */
 export function composeDynamicQueries(limit = 20) {
   const generated = [];
-  const templates = [
-    (intent, deliverable, provider) => `${intent} ${deliverable} ${provider}`,
-    (intent, modifier, deliverable) => `${intent} ${modifier} ${deliverable}`,
-    (intent, deliverable) => `${intent} someone to build a ${deliverable}`,
-    (intent, provider, deliverable) => `${intent} ${provider} to build ${deliverable}`
-  ];
-
   for (const intent of QUERY_COMPONENTS.INTENTS) {
     for (const deliv of QUERY_COMPONENTS.DELIVERABLES) {
       for (const prov of QUERY_COMPONENTS.PROVIDERS) {
-        generated.push({
-          query: `${intent} ${deliv} ${prov}`,
-          priority: QUERY_PRIORITY.HIGH,
-          category: 'dynamic_composed'
-        });
+        generated.push(createQuery(`${intent} ${deliv} ${prov}`, {
+          category: 'dynamic_composed',
+          intentType: 'buyer_request',
+          deliverableType: 'custom_software',
+          qualityTier: 'A'
+        }));
         if (generated.length >= limit) return generated;
       }
     }
   }
-
   return generated;
 }
 
-// ----------------------------------------------------
-// SITE-SPECIFIC PREFIXES & OPERATORS (Section 6)
-// ----------------------------------------------------
 export const TARGET_PLATFORM_DOMAINS = [
   'reddit.com',
   'indiehackers.com',
@@ -372,9 +349,6 @@ export const TARGET_PLATFORM_DOMAINS = [
   'news.ycombinator.com'
 ];
 
-/**
- * Attach site operator to a query
- */
 export function applySiteFilter(queryStr, domain) {
   const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
   const cleanQuery = queryStr.replace(/^["']|["']$/g, '').trim();

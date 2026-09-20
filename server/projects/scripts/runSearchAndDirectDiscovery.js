@@ -1,17 +1,20 @@
 /**
- * LeadSpy Full End-to-End Discovery Pipeline Runner
+ * LeadSpy Full End-to-End Discovery Pipeline Runner - V2
  * File: server/projects/scripts/runSearchAndDirectDiscovery.js
  * 
- * Implements:
- * 1. Layer 1: Query Library & QueryRotatorService (Cycles, Priorities, Batching, DISCOVERY_MODE)
- * 2. Layer 2: Multi-Provider Search + Direct Sources (HN 30d, Reddit, GitHub) with RATE_LIMITED tracking
+ * Supports:
+ * 1. Layer 1: Query Library & Balanced QueryRotatorService (Extended metadata propagation)
+ * 2. Layer 2: MultiSearchManager V2 (Primary -> Deterministic Quality Check -> Fallback Chain -> Enrichment)
  * 3. Canonical Deduplication (Raw URL, Canonical URL, Source-ID, Content Fingerprint)
- * 4. Deep Content Extractor (Full page context, publish date, contacts)
- * 5. Project Classifier AI (Deterministic 9-Gate Qualification)
- * 6. Gate 8 Semantic Deduplication (Unchanged safety net)
- * 7. Deduplication Metrics Reporting (Task 7)
- * 8. Database Persistence (Supabase master_projects)
+ * 4. Source-Aware Cheap Pre-Crawl Filter (scoreSearchResult with explainable evidence)
+ * 5. Strict Crawl Safeguards (PRE_CRAWL_THRESHOLD, MAX_CRAWLS_PER_QUERY, MAX_TOTAL_CRAWLS_PER_RUN)
+ * 6. Reddit Recall Fix (Evaluates buyer/project intent without requiring the word "hiring")
+ * 7. Untouched 9-Gate Qualification Engine (Preserved Gate 8 & Gate 7)
+ * 8. Configurable DB Persistence (Supports PERSIST_TO_DB=false for audit-only runs)
  */
+
+import dotenv from 'dotenv';
+dotenv.config();
 
 import { QueryRotatorService, ROTATION_CYCLES } from '../services/queryRotatorService.js';
 import { DISCOVERY_MODE } from '../config/projectQueryLibrary.js';
@@ -20,6 +23,163 @@ import { ContentExtractor } from '../services/contentExtractor.js';
 import { ProjectClassifier } from '../ai/projectClassifier.js';
 import { CanonicalDeduplicator } from '../services/canonicalDeduplicator.js';
 import { saveMasterProjects } from '../services/projectDbService.js';
+
+/**
+ * Deterministic, Source-Aware Pre-Crawl Scoring Function
+ * Evaluates cheap metadata (title, snippet, url, sourceDomain, query context) with zero network cost.
+ * 
+ * @param {Object} item - SERP result candidate
+ * @param {Object} context - Query metadata context (intentType, deliverableType, sourceScope, priority)
+ * @returns {Object} { score, decision, positiveSignals, negativeSignals, sourceScope, rejectionReason }
+ */
+export function scoreSearchResult(item, context = {}) {
+  const title = (item.title || '').trim();
+  const snippet = (item.snippet || '').trim();
+  const fullText = `${title} ${snippet}`;
+  const url = (item.url || '').toLowerCase();
+  const sourceScope = context.sourceScope || item.source || 'public_web';
+
+  const positiveSignals = [];
+  const negativeSignals = [];
+  let score = 0;
+
+  // 1. POSITIVE SIGNALS
+  // 1.1 Direct Buyer Intent (+30)
+  const buyerIntentRegex = /\b(need|needs|looking for|seeking|want to build|looking to outsource|our company|for our business|hiring (an?\s*)?(developer|agency|team|someone|firm)|request for proposal|rfp|scope of work|proposal|budget|quote|vendor|agency|technology partner)\b/i;
+  if (buyerIntentRegex.test(fullText)) {
+    score += 30;
+    const m = fullText.match(buyerIntentRegex);
+    positiveSignals.push(`Buyer intent: "${m[0]}"`);
+  }
+
+  // 1.2 Concrete IT Deliverable (+25)
+  const deliverableRegex = /\b(website|web app|web application|mobile app|software|saas|mvp|crm|erp|dashboard|portal|automation|ai agent|chatbot|api|ecommerce|booking system|platform|application)\b/i;
+  if (deliverableRegex.test(fullText)) {
+    score += 25;
+    const m = fullText.match(deliverableRegex);
+    positiveSignals.push(`IT deliverable: "${m[0]}"`);
+  }
+
+  // 1.3 Project / Procurement Signal (+20)
+  const procurementRegex = /\b(request for proposal|rfp|scope of work|statement of work|fixed price|contract project|budget\s*[:=$]|project budget|send proposal|quotation)\b/i;
+  if (procurementRegex.test(fullText)) {
+    score += 20;
+    const m = fullText.match(procurementRegex);
+    positiveSignals.push(`Procurement/Budget: "${m[0]}"`);
+  }
+
+  // 1.4 Project Action Verb (+15)
+  const actionVerbRegex = /\b(build|develop|create|implement|integrate|redesign|revamp|maintain|fix|outsource|development team)\b/i;
+  if (actionVerbRegex.test(fullText)) {
+    score += 15;
+    const m = fullText.match(actionVerbRegex);
+    positiveSignals.push(`Project action: "${m[0]}"`);
+  }
+
+  // 1.5 Direct Outreach / Contact Signal (+10)
+  const contactSignalRegex = /\b(contact\s*(us|me)?|email|dm me|pm me|inbox|send details|apply at|quote)\b/i;
+  if (contactSignalRegex.test(fullText)) {
+    score += 10;
+    positiveSignals.push('Outreach/Contact signal');
+  }
+
+  // Contextual metadata boost from Query Library
+  if (context.qualityTier === 'A') {
+    score += 5;
+    positiveSignals.push('Query Quality Tier A');
+  }
+
+  // 2. NEGATIVE SIGNALS (Context-Aware)
+  // 2.1 Job / Employment Signal (-50)
+  const isFeatureSalary = /salary\s*(calculation|module|component|system|slip)/i.test(fullText);
+  const employmentRegex = /\b(senior\s*(software|react|node|frontend|backend)\s*developer|sde\b|full[- ]?time (job|role|position|employee)|permanent (role|position)|annual ctc|ctc\s*[:=]|[\d.]+\s*lpa|job vacancy|job opening|notice period|submit resume|send your cv|join our team|401k|benefits package|\$\d+k salary|w2 role)\b/i;
+  if (!isFeatureSalary && employmentRegex.test(fullText)) {
+    score -= 50;
+    negativeSignals.push('Employment/Salaried job signal');
+  }
+
+  // 2.2 Internship / Trainee (-50)
+  if (/\b(intern\b|internship|apprenticeship|trainee|stipend)\b/i.test(fullText)) {
+    score -= 50;
+    negativeSignals.push('Internship/Trainee signal');
+  }
+
+  // 2.3 Educational / Tutorial / Guide / Informational Blog (-45)
+  const informationalArticleRegex = /\b(why (you|businesses|companies) need|top \d+ reasons|reasons (you|businesses) need|how to (learn|build|use|setup|choose)|guide to|tutorial|course|learn react|documentation|step by step guide|definition of|read our blog)\b/i;
+  if (informationalArticleRegex.test(fullText)) {
+    score -= 45;
+    negativeSignals.push('Informational blog/article/guide');
+  }
+
+  // 2.4 Technical Discussion / Comparison (-35)
+  const discussionRegex = /\b(ask hn|what is the best|which (framework|stack|library) is better|what do you think of|pros and cons|vs\b|comparison|reddit discussion)\b/i;
+  if (discussionRegex.test(fullText)) {
+    score -= 35;
+    negativeSignals.push('General technical discussion/question');
+  }
+
+  // 2.5 Product / Marketing URL Paths (-30)
+  const isProductPath = /\/(pricing|features|blog|docs|documentation|about|services|category|tag|author)\b/i.test(url) ||
+                        /\b(download (our|the)? (software|app|tool)|features and download|welcome to our (website|software))\b/i.test(fullText);
+  if (isProductPath) {
+    score -= 30;
+    negativeSignals.push('Product homepage or marketing blog path');
+  }
+
+  // 2.6 Pure Marketing / Non-IT Gig (-45)
+  const isCustomAutomationSoftware = /marketing automation\s*(software|platform|system|tool|app)/i.test(fullText);
+  const nonItRegex = /\b(marketing agency|social media marketing|seo agency|copywriter|content writer|virtual assistant|va\b|video editor|manage instagram|reels creator)\b/i;
+  if (!isCustomAutomationSoftware && nonItRegex.test(fullText)) {
+    score -= 45;
+    negativeSignals.push('Non-IT marketing/agency service');
+  }
+
+  // 2.7 Blacklisted Domains (-100)
+  const domain = (item.sourceDomain || '').toLowerCase();
+  const isBlacklisted = domain.includes('merriam-webster') ||
+                        domain.includes('wikipedia.org') ||
+                        domain.includes('dictionary') ||
+                        domain.includes('naukri.com') ||
+                        domain.includes('indeed.com') ||
+                        domain.includes('glassdoor') ||
+                        domain.includes('workindia');
+  if (isBlacklisted) {
+    score -= 100;
+    negativeSignals.push(`Blacklisted domain: ${domain}`);
+  }
+
+  // Source-Specific Adjustments
+  if (sourceScope === 'reddit') {
+    // Reddit posts with supply-side self intro get penalized
+    if (/\b(for hire|hire me|my portfolio|available for freelance)\b/i.test(fullText)) {
+      score -= 50;
+      negativeSignals.push('Reddit supply-side freelancer self-pitch');
+    }
+  } else if (sourceScope === 'github') {
+    // Normal bug issues get penalized
+    if (/\b(issue #\d+|bug fix|pr #\d+|merge branch|lint failed)\b/i.test(fullText) && !/\b(bounty|paid|budget|\$)\b/i.test(fullText)) {
+      score -= 40;
+      negativeSignals.push('GitHub non-commercial codebase bug report');
+    }
+  }
+
+  const threshold = Number(process.env.PRE_CRAWL_THRESHOLD) || 45;
+  const decision = score >= threshold ? 'accept' : 'reject';
+  let rejectionReason = null;
+  if (decision === 'reject') {
+    if (negativeSignals.length > 0) rejectionReason = negativeSignals[0];
+    else rejectionReason = 'INSUFFICIENT_BUYER_INTENT_OR_DELIVERABLE';
+  }
+
+  return {
+    score,
+    decision,
+    positiveSignals,
+    negativeSignals,
+    sourceScope,
+    rejectionReason
+  };
+}
 
 export async function runFullDiscoveryPipeline(config = {}) {
   const {
@@ -30,12 +190,19 @@ export async function runFullDiscoveryPipeline(config = {}) {
     siteFilter = null,
     location = null,
     mode = DISCOVERY_MODE.STANDARD,
-    persistToDb = true
+    persistToDb = (process.env.PERSIST_TO_DB !== 'false')
   } = config;
 
+  // Safeguards and thresholds
+  const preCrawlThreshold = Number(process.env.PRE_CRAWL_THRESHOLD) || 45;
+  const maxCrawlsPerQuery = Number(process.env.MAX_CRAWLS_PER_QUERY) || 3;
+  const maxTotalCrawlsPerRun = Number(process.env.MAX_TOTAL_CRAWLS_PER_RUN) || 50;
+
   console.log('================================================================');
-  console.log(`🚀 RUNNING PROJECT DISCOVERY PIPELINE [MODE: ${mode.toUpperCase()}]`);
+  console.log(`🚀 RUNNING PROJECT DISCOVERY PIPELINE V2 [MODE: ${mode.toUpperCase()}]`);
   console.log(`   Config: Cycle ${cycle} | Batch Size: ${batchSize} | Days: ${days}`);
+  console.log(`   Safeguards: Pre-Crawl Threshold: ${preCrawlThreshold} | Max/Query: ${maxCrawlsPerQuery} | Max Run Crawls: ${maxTotalCrawlsPerRun}`);
+  console.log(`   Persistence Mode: ${persistToDb ? 'ACTIVE (Persist to Supabase)' : 'AUDIT ONLY (PERSIST_TO_DB=false)'}`);
   if (categories) console.log(`   Selected Categories: ${categories.join(', ')}`);
   if (siteFilter) console.log(`   Site Filter: ${siteFilter}`);
   if (location) console.log(`   Target Location: ${location}`);
@@ -44,15 +211,14 @@ export async function runFullDiscoveryPipeline(config = {}) {
   const rotator = new QueryRotatorService({ days, batchSize, cycle, categories, siteFilter, location, mode });
   const searchQueries = rotator.getQueriesForCycle({ mode, batchSize });
 
-  console.log(`📋 Selected ${searchQueries.length} prioritized queries [Mode: ${mode}]:`);
-  searchQueries.forEach((q, i) => console.log(`   ${i + 1}. [${q.priority}] ${q.query}`));
+  console.log(`📋 Selected ${searchQueries.length} balanced prioritized queries [Mode: ${mode}]:`);
+  searchQueries.forEach((q, i) => console.log(`   ${i + 1}. [${q.priority}|${q.intentType || 'gen'}|${q.qualityTier || 'A'}] ${q.query}`));
   console.log('');
 
   const searchManager = new MultiSearchManager();
   const contentExtractor = new ContentExtractor();
   const canonicalDeduplicator = new CanonicalDeduplicator();
   const classifier = new ProjectClassifier();
-  // Gemini 3.6 Flash enabled for high-precision LLM qualification with heuristic fallback
 
   const rawCandidatePool = [];
   const queryStatsMap = new Map();
@@ -65,16 +231,27 @@ export async function runFullDiscoveryPipeline(config = {}) {
 
   function trackFound(queryStr, sourceName) {
     if (!queryStatsMap.has(queryStr)) {
-      queryStatsMap.set(queryStr, { source: sourceName, rawResults: 0, uniqueResults: 0, qualified: 0, rejected: 0 });
+      queryStatsMap.set(queryStr, {
+        source: sourceName,
+        rawResults: 0,
+        uniqueResults: 0,
+        preFilterAccepted: 0,
+        preFilterRejected: 0,
+        deepCrawled: 0,
+        qualified: 0,
+        contactable: 0,
+        rejected: 0,
+        rejectionReasons: {}
+      });
     }
     const stat = queryStatsMap.get(queryStr);
     stat.rawResults++;
   }
 
-  function ingestCandidate(rawItem) {
+  function ingestCandidate(rawItem, queryContext = {}) {
     trackFound(rawItem.search_query, rawItem.source);
 
-    // Pre-Classification Canonical Deduplication (Tasks 2, 3, 4)
+    // Pre-Classification Canonical Deduplication
     const check = canonicalDeduplicator.checkUrlCandidate(rawItem);
     if (!check.isDuplicate) {
       const stat = queryStatsMap.get(rawItem.search_query);
@@ -83,13 +260,14 @@ export async function runFullDiscoveryPipeline(config = {}) {
       rawCandidatePool.push({
         ...rawItem,
         canonicalUrl: check.canonicalUrl || rawItem.url,
-        canonicalId: check.canonicalId || null
+        canonicalId: check.canonicalId || null,
+        queryContext
       });
     }
   }
 
   // -------------------------------------------------------------
-  // 1. DIRECT SOURCE: Hacker News (Strictly within last 30 days)
+  // 1. DIRECT SOURCE: Hacker News (Recent Contract Threads)
   // -------------------------------------------------------------
   console.log('📡 [Direct Source] Fetching Hacker News recent contract threads...');
   try {
@@ -120,7 +298,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
           search_source: 'hackernews',
           search_result_url: itemUrl,
           discovered_at: new Date().toISOString()
-        });
+        }, { sourceScope: 'hackernews', intentType: 'project_requirement', priority: 'MEDIUM' });
       }
     }
   } catch (err) {
@@ -128,10 +306,12 @@ export async function runFullDiscoveryPipeline(config = {}) {
   }
 
   // -------------------------------------------------------------
-  // 2. DIRECT SOURCE: Reddit Live Hiring Feeds
+  // 2. DIRECT SOURCE: Reddit Live Feeds (Recall Fix: Evaluates Buyer/Project Intent)
   // -------------------------------------------------------------
-  console.log('📡 [Direct Source] Fetching live Reddit feeds with rate-limit detection...');
+  console.log('📡 [Direct Source] Fetching live Reddit feeds (Intent-based, not hiring-only)...');
   const subreddits = ['forhire', 'freelance_forhire', 'jobbit'];
+  const projectIntentFilter = /\b(hiring|need|looking for|seeking|build|develop|create|saas|app|website|software|crm|platform|mvp|agency|developer|team)\b/i;
+
   for (const sub of subreddits) {
     try {
       const res = await fetch(`https://www.reddit.com/r/${sub}/new/.rss`, {
@@ -153,7 +333,8 @@ export async function runFullDiscoveryPipeline(config = {}) {
           const author = (e.match(/<name>([\s\S]*?)<\/name>/) || [])[1] || 'RedditUser';
           const content = (e.match(/<content[^>]*>([\s\S]*?)<\/content>/) || [])[1]?.replace(/<[^>]*>?/gm, ' ') || rawTitle;
 
-          if (/\[hiring\]/i.test(rawTitle) || /hiring/i.test(rawTitle)) {
+          // Recall fix: Accept if title OR content matches project/buyer intent
+          if (projectIntentFilter.test(rawTitle) || projectIntentFilter.test(content.substring(0, 200))) {
             ingestCandidate({
               source: 'reddit',
               url: link,
@@ -166,13 +347,12 @@ export async function runFullDiscoveryPipeline(config = {}) {
               search_source: 'reddit',
               search_result_url: link,
               discovered_at: new Date().toISOString()
-            });
+            }, { sourceScope: 'reddit', intentType: 'buyer_request', priority: 'HIGH' });
           }
         }
       }
     } catch (err) {}
-    // Rate-aware pause
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 400));
   }
 
   // -------------------------------------------------------------
@@ -180,19 +360,20 @@ export async function runFullDiscoveryPipeline(config = {}) {
   // -------------------------------------------------------------
   console.log('📡 [Direct Source] Fetching GitHub open client requests...');
   try {
-    const ghQuery = mode === DISCOVERY_MODE.HIGH_INTENT 
-      ? '("need someone to build" OR "looking for development agency" OR "need an app built") is:issue is:open'
-      : '("need developer" OR "looking for developer" OR "build website") is:issue is:open';
-
+    const thirtyDaysIso = new Date(Date.now() - (days * 86400 * 1000)).toISOString().split('T')[0];
+    const ghQuery = `is:issue is:open created:>${thirtyDaysIso} "development agency" OR "looking to hire" OR "bounty"`;
     const ghUrl = `https://api.github.com/search/issues?q=${encodeURIComponent(ghQuery)}&sort=created&order=desc&per_page=15`;
     const ghRes = await fetch(ghUrl, {
-      headers: { 'User-Agent': 'LeadSpyBot/1.0', 'Accept': 'application/vnd.github.v3+json' },
+      headers: {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'LeadSpy-Project-Discovery'
+      },
       signal: AbortSignal.timeout(8000)
     });
 
     if (ghRes.status === 403 || ghRes.status === 429) {
       providerStatus.github = 'RATE_LIMITED';
-      console.warn('   ⚠️ GitHub Search API returned HTTP 403/429 (RATE_LIMITED) - respecting rate window');
+      console.warn('   ⚠️ GitHub Search API returned HTTP 403/429 (RATE_LIMITED)');
     } else if (ghRes.ok) {
       const ghData = await ghRes.json();
       for (const item of (ghData.items || [])) {
@@ -208,7 +389,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
           search_source: 'github',
           search_result_url: item.html_url,
           discovered_at: new Date().toISOString()
-        });
+        }, { sourceScope: 'github', intentType: 'project_requirement', priority: 'HIGH' });
       }
     }
   } catch (err) {
@@ -216,14 +397,19 @@ export async function runFullDiscoveryPipeline(config = {}) {
   }
 
   // -------------------------------------------------------------
-  // 4. SEARCH PROVIDERS: Executing Rotator Queries with Backoff
+  // 4. SEARCH PROVIDERS V2: Executing Rotator Queries with Fallback Chain
   // -------------------------------------------------------------
-  console.log(`📡 [Search Providers] Executing ${searchQueries.length} queries across web engines...`);
+  console.log(`📡 [Search Providers V2] Executing ${searchQueries.length} balanced queries with fallback chain...`);
 
   for (const item of searchQueries) {
     const queryStr = item.query;
     try {
-      const { provider, results } = await searchManager.searchWithFallback(queryStr, { timeRange: 'month', limit: 8 });
+      const { provider, results, quality, fallbackOccurred } = await searchManager.searchWithFallback(queryStr, {
+        timeRange: 'month',
+        limit: 8,
+        enrich: item.priority === 'HIGH' && item.qualityTier === 'A'
+      });
+
       for (const r of results) {
         if (contentExtractor.isValidTarget(r.url)) {
           ingestCandidate({
@@ -237,27 +423,83 @@ export async function runFullDiscoveryPipeline(config = {}) {
             search_result_url: r.url,
             discovered_at: new Date().toISOString(),
             postedAt: null
+          }, {
+            sourceScope: item.sourceScope || 'public_web',
+            intentType: item.intentType || 'buyer_request',
+            deliverableType: item.deliverableType || 'custom_software',
+            priority: item.priority,
+            qualityTier: item.qualityTier
           });
         }
       }
     } catch (err) {
       console.warn(`   [Search Engine notice for "${queryStr}"]:`, err.message);
     }
-    // Respect rate limits with queue delay
     await new Promise(r => setTimeout(r, 400));
   }
 
   // -------------------------------------------------------------
-  // 5. CONTENT EXTRACTION & FINGERPRINT DEDUPLICATION (Tasks 2 & 5)
+  // 5. SOURCE-AWARE CHEAP PRE-CRAWL FILTER (Phase 4)
+  // Evaluates every candidate deterministically with zero network cost
   // -------------------------------------------------------------
-  console.log(`\n🔍 Fetching & Extracting deep content for ${rawCandidatePool.length} pre-deduplicated candidates...`);
-  const enrichedCandidates = [];
+  console.log(`\n🛡️ Running Source-Aware Pre-Crawl Filter on ${rawCandidatePool.length} pre-deduplicated candidates...`);
+
+  // Group candidates by search query to enforce maxCrawlsPerQuery
+  const queryCandidatesMap = new Map();
+  let totalPreFilterAccepted = 0;
+  let totalPreFilterRejected = 0;
 
   for (const item of rawCandidatePool) {
+    const qKey = item.search_query || 'direct_source';
+    if (!queryCandidatesMap.has(qKey)) queryCandidatesMap.set(qKey, []);
+
+    const evalResult = scoreSearchResult(item, item.queryContext);
+    item.preCrawlEval = evalResult;
+
+    const stat = queryStatsMap.get(item.search_query);
+    if (evalResult.decision === 'accept') {
+      totalPreFilterAccepted++;
+      if (stat) stat.preFilterAccepted++;
+      queryCandidatesMap.get(qKey).push(item);
+    } else {
+      totalPreFilterRejected++;
+      if (stat) {
+        stat.preFilterRejected++;
+        const r = evalResult.rejectionReason || 'LOW_SCORE';
+        stat.rejectionReasons[r] = (stat.rejectionReasons[r] || 0) + 1;
+      }
+    }
+  }
+
+  // Sort each query group by score descending and take up to maxCrawlsPerQuery
+  const approvedForCrawl = [];
+  for (const [qKey, candidates] of queryCandidatesMap.entries()) {
+    candidates.sort((a, b) => b.preCrawlEval.score - a.preCrawlEval.score);
+    const allowed = candidates.slice(0, maxCrawlsPerQuery);
+    for (const c of allowed) {
+      if (approvedForCrawl.length < maxTotalCrawlsPerRun) {
+        approvedForCrawl.push(c);
+      }
+    }
+  }
+
+  console.log(`   -> Pre-Filter Accepted: ${totalPreFilterAccepted} | Pre-Filter Rejected: ${totalPreFilterRejected}`);
+  console.log(`   -> Promising Candidates Scheduled for Deep Crawl: ${approvedForCrawl.length} (Cap: ${maxTotalCrawlsPerRun})`);
+
+  // -------------------------------------------------------------
+  // 6. SELECTIVE DEEP CRAWL & CONTENT FINGERPRINT DEDUPLICATION
+  // -------------------------------------------------------------
+  console.log(`\n🔍 Selectively Deep Crawling ${approvedForCrawl.length} promising URLs...`);
+  const enrichedCandidates = [];
+  let extractionFailures = 0;
+
+  for (const item of approvedForCrawl) {
+    const stat = queryStatsMap.get(item.search_query);
+    if (stat) stat.deepCrawled++;
+
     try {
       const extracted = await contentExtractor.extractDeepContent(item);
       if (extracted && extracted.rawContent) {
-        // Step 2 Pre-Filter: Content Fingerprint Deduplication
         const fpCheck = canonicalDeduplicator.checkContentCandidate(extracted.title || item.title, extracted.rawContent);
         if (!fpCheck.isDuplicate) {
           extracted.search_query = item.search_query || 'unknown';
@@ -268,14 +510,18 @@ export async function runFullDiscoveryPipeline(config = {}) {
 
           enrichedCandidates.push(extracted);
         }
+      } else {
+        extractionFailures++;
       }
-    } catch (err) {}
+    } catch (err) {
+      extractionFailures++;
+    }
   }
 
-  console.log(`✨ Filtered into ${enrichedCandidates.length} clean candidates sent to 9-Gate Classifier.`);
+  console.log(`✨ ${enrichedCandidates.length} successfully extracted candidates sent to 9-Gate Classifier.`);
 
   // -------------------------------------------------------------
-  // 6. QUALIFICATION VIA 9-GATE ENGINE (Gate 8 Semantic Dedup Preserved)
+  // 7. QUALIFICATION VIA UNTOUCHED 9-GATE ENGINE
   // -------------------------------------------------------------
   const qualifiedProjects = [];
   const rejectionReasons = {};
@@ -291,7 +537,10 @@ export async function runFullDiscoveryPipeline(config = {}) {
       result.search_query = candidate.search_query;
       result.search_source = candidate.search_source;
 
-      if (qStat) qStat.qualified++;
+      if (qStat) {
+        qStat.qualified++;
+        if (result.contact_type !== 'none') qStat.contactable++;
+      }
       qualifiedProjects.push(result);
 
       console.log(`🌟 [QUALIFIED] [${result.source.toUpperCase()}] ${result.title.substring(0, 70)}`);
@@ -308,46 +557,63 @@ export async function runFullDiscoveryPipeline(config = {}) {
   const dedupMetrics = canonicalDeduplicator.getMetrics();
   const finalUniqueCandidates = enrichedCandidates.length - gate8Duplicates;
 
+  // Crawl reduction rate diagnostic
+  const totalEvaluated = rawCandidatePool.length;
+  const crawlReductionRate = totalEvaluated > 0
+    ? `${((1 - (approvedForCrawl.length / totalEvaluated)) * 100).toFixed(1)}%`
+    : '0.0%';
+
   // -------------------------------------------------------------
-  // 7. STRUCTURED DEDUPLICATION & RUN REPORT (Task 7)
+  // 8. STRUCTURED FUNNEL METRICS REPORT
   // -------------------------------------------------------------
   console.log('================================================================');
-  console.log(`📊 DEDUPLICATION & CLASSIFICATION METRICS [MODE: ${mode.toUpperCase()}]:`);
+  console.log(`📊 COMPLETE RETRIEVAL FUNNEL & EFFICIENCY METRICS [MODE: ${mode.toUpperCase()}]:`);
   console.log(`   Raw Search Results               : ${dedupMetrics.rawResults}`);
-  console.log(`   Exact URL Duplicates Removed     : ${dedupMetrics.urlDuplicatesRemoved}`);
-  console.log(`   Canonical URL Duplicates Removed : ${dedupMetrics.canonicalUrlDuplicatesRemoved}`);
-  console.log(`   Source-ID Duplicates Removed     : ${dedupMetrics.sourceIdDuplicatesRemoved}`);
-  console.log(`   Content Duplicates Removed       : ${dedupMetrics.contentDuplicatesRemoved}`);
+  console.log(`   Unique Search Results            : ${totalEvaluated}`);
+  console.log(`   Pre-Filter Accepted              : ${totalPreFilterAccepted}`);
+  console.log(`   Pre-Filter Rejected (Zero Crawl) : ${totalPreFilterRejected}`);
+  console.log(`   Deep Crawled (Promising URLs)    : ${approvedForCrawl.length}`);
+  console.log(`   Extraction Failures              : ${extractionFailures}`);
   console.log(`   Candidates Entering Classifier   : ${enrichedCandidates.length}`);
   console.log(`   Gate 8 Semantic Duplicates       : ${gate8Duplicates}`);
-  console.log(`   Final Unique Candidates          : ${finalUniqueCandidates}`);
-  console.log(`   Qualified Projects               : ${qualifiedProjects.length}`);
+  console.log(`   Final Qualified Projects         : ${qualifiedProjects.length}`);
+  console.log(`   Contactable Leads Verified       : ${qualifiedProjects.filter(p => p.has_actionable_contact).length}`);
+  console.log(`   Diagnostic Crawl Reduction Rate  : ${crawlReductionRate}`);
   console.log(`   Rejection Breakdown              :`, rejectionReasons);
-  console.log(`   Provider Rate-Limit Status       :`, providerStatus);
+  console.log(`   Provider Status                  :`, providerStatus);
   console.log('================================================================\n');
 
-  // Query performance breakdown
+  // Query performance breakdown report
   const queryBreakdown = [];
   for (const [qStr, stat] of queryStatsMap.entries()) {
-    const qualRate = stat.rawResults > 0 ? (stat.qualified / stat.rawResults).toFixed(3) : 0;
+    const qualRate = stat.deepCrawled > 0 ? (stat.qualified / stat.deepCrawled).toFixed(3) : 0;
+    const crawlEff = stat.deepCrawled > 0 ? (stat.qualified / stat.deepCrawled).toFixed(3) : 0;
     queryBreakdown.push({
       query: qStr,
       source: stat.source,
       rawResults: stat.rawResults,
       uniqueResults: stat.uniqueResults,
+      preFilterAccepted: stat.preFilterAccepted,
+      deepCrawled: stat.deepCrawled,
       qualified: stat.qualified,
-      rejected: stat.rejected,
-      qualificationRate: qualRate
+      contactable: stat.contactable,
+      qualificationRate: qualRate,
+      crawlEfficiency: crawlEff
     });
+
+    // Record into global telemetry
+    rotator.recordQueryPerformance(qStr, stat);
   }
 
   // -------------------------------------------------------------
-  // 8. DATABASE PERSISTENCE
+  // 9. DATABASE PERSISTENCE (Auditable with PERSIST_TO_DB)
   // -------------------------------------------------------------
   if (persistToDb && qualifiedProjects.length > 0) {
     console.log(`💾 Persisting ${qualifiedProjects.length} qualified leads into Database...`);
     const dbRes = await saveMasterProjects(qualifiedProjects);
     console.log(`✅ Supabase Database updated! Total active projects: ${dbRes.total || qualifiedProjects.length}`);
+  } else if (!persistToDb && qualifiedProjects.length > 0) {
+    console.log(`🔍 [AUDIT RUN] Persistence disabled (persistToDb=false). Generated ${qualifiedProjects.length} qualified leads without modifying DB.`);
   }
 
   return {
@@ -355,14 +621,17 @@ export async function runFullDiscoveryPipeline(config = {}) {
     cycle,
     metrics: {
       rawResults: dedupMetrics.rawResults,
-      urlDuplicatesRemoved: dedupMetrics.urlDuplicatesRemoved,
-      canonicalUrlDuplicatesRemoved: dedupMetrics.canonicalUrlDuplicatesRemoved,
-      sourceIdDuplicatesRemoved: dedupMetrics.sourceIdDuplicatesRemoved,
-      contentDuplicatesRemoved: dedupMetrics.contentDuplicatesRemoved,
+      uniqueResults: totalEvaluated,
+      preFilterAccepted: totalPreFilterAccepted,
+      preFilterRejected: totalPreFilterRejected,
+      deepCrawled: approvedForCrawl.length,
+      extractionFailures,
       candidatesEnteringClassifier: enrichedCandidates.length,
       gate8Duplicates,
       finalUniqueCandidates,
-      qualifiedProjects: qualifiedProjects.length
+      qualifiedProjects: qualifiedProjects.length,
+      contactableProjects: qualifiedProjects.filter(p => p.has_actionable_contact).length,
+      crawlReductionRate
     },
     rejectionReasons,
     providerStatus,
