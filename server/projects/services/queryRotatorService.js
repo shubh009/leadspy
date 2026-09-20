@@ -254,6 +254,21 @@ export class QueryRotatorService {
       }
     }
 
+    if (selected.length < batchSize) {
+      for (const q of candidateQueries) {
+        if (selected.length >= batchSize) break;
+        tryAdd(q);
+      }
+    }
+
+    if (selected.length < batchSize) {
+      const dynamicList = composeDynamicQueries(batchSize - selected.length + 5);
+      for (const q of dynamicList) {
+        if (selected.length >= batchSize) break;
+        tryAdd(q);
+      }
+    }
+
     const finalQueries = selected.slice(0, batchSize).map(q => {
       let qStr = q.query;
       if (options.siteFilter) {

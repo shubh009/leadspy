@@ -448,7 +448,7 @@ export function generateControlledCombinatorialQueries({ cycle = 1, batchSize = 
     const qStr = (i === 0)
       ? `site:reddit.com/r/${sub} "[Hiring]" "${deliv}"`
       : (i % 2 === 0)
-        ? `site:reddit.com/r/${sub} "[Hiring]" MVP OR "custom software"`
+        ? `site:reddit.com/r/${sub} "[Hiring]" "${deliv}" OR "custom software"`
         : `site:reddit.com/r/${sub} "need developer" OR "looking to hire" ${deliv}`;
 
     redditQueries.push(createQuery(qStr, {
@@ -465,7 +465,8 @@ export function generateControlledCombinatorialQueries({ cycle = 1, batchSize = 
   const hnFootprints = ['"SEEKING FREELANCER"', '"need someone to build"', '"looking for agency"'];
   for (let i = 0; i < quotas.hackernews; i++) {
     const fp = hnFootprints[i % hnFootprints.length];
-    const deliv = DELIVERABLES[(i + cycleOffset) % DELIVERABLES.length];
+    const shift = Math.floor(i / hnFootprints.length);
+    const deliv = DELIVERABLES[(i * 2 + cycleOffset + shift) % DELIVERABLES.length];
     hnQueries.push(createQuery(`site:news.ycombinator.com ${fp} ${deliv}`, {
       priority: QUERY_PRIORITY.HIGH,
       intentType: 'buyer_request',

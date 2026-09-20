@@ -912,15 +912,169 @@ export async function runPhaseDPilot(options = {}) {
   return runFullDiscoveryPipeline(lockedConfig);
 }
 
+/**
+ * PHASE E: Scaled Multi-Cycle Production Discovery Runner
+ * Supports running across cycles 1, 2, and 3 (scaled batch: 100 - 300 queries).
+ * Supports AUDIT mode (auditOnly=true, persistToDb=false) and
+ * PRODUCTION mode (persistToDb=true, auditOnly=false) which writes qualified leads to Supabase.
+ * 
+ * @param {Object} options - { totalQueries: 100, cycles: [1, 2, 3], persistToDb: false, auditOnly: true, dryRun: false, ... }
+ * @returns {Promise<Object>} Aggregated run results and funnel metrics across all cycles
+ */
+export async function runProductionScaledDiscovery(options = {}) {
+  const {
+    totalQueries = 100,
+    cycles = [1, 2, 3],
+    days = 30,
+    persistToDb = false,
+    auditOnly = true,
+    dryRun = false,
+    mode = DISCOVERY_MODE.STANDARD
+  } = options;
+
+  console.log('================================================================');
+  console.log(`🚀 [PHASE E] PRODUCTION SCALED DISCOVERY RUNNER`);
+  console.log(`   Target Queries: ${totalQueries} | Cycles: ${cycles.join(', ')} | Days: ${days}`);
+  console.log(`   Persistence Mode: ${persistToDb && !auditOnly ? 'ACTIVE (Supabase DB writes ENABLED)' : 'AUDIT ONLY (DB writes BLOCKED)'}`);
+  console.log('================================================================\n');
+
+  // Allocate queries per cycle
+  const queriesPerCycle = Math.ceil(totalQueries / cycles.length);
+  const cycleResults = [];
+  const allQualifiedProjects = [];
+  const aggregatedMetrics = {
+    totalQueriesExecuted: 0,
+    rawResults: 0,
+    uniqueResults: 0,
+    linkHealthChecked: 0,
+    linkHealthPassed: 0,
+    linkHealthFailed: 0,
+    pageValidityChecked: 0,
+    pageValidityPassed: 0,
+    pageValidityFailed: 0,
+    pageFetchAttempts: 0,
+    pageFetchSuccesses: 0,
+    pageFetchFailures: 0,
+    verificationCacheHits: 0,
+    verificationCacheMisses: 0,
+    deepCrawled: 0,
+    qualifiedProjects: 0,
+    contactableProjects: 0
+  };
+
+  for (const cycleNum of cycles) {
+    console.log(`\n--- Executing Cycle ${cycleNum} (${queriesPerCycle} queries) ---`);
+    const cycleRes = await runFullDiscoveryPipeline({
+      ...options,
+      cycle: cycleNum,
+      batchSize: queriesPerCycle,
+      days,
+      persistToDb,
+      auditOnly,
+      dryRun,
+      mode
+    });
+
+    cycleResults.push(cycleRes);
+
+    if (dryRun) {
+      aggregatedMetrics.totalQueriesExecuted += (cycleRes.queries?.length || 0);
+      continue;
+    }
+
+    if (cycleRes.projects && cycleRes.projects.length > 0) {
+      allQualifiedProjects.push(...cycleRes.projects);
+    }
+
+    if (cycleRes.metrics) {
+      aggregatedMetrics.totalQueriesExecuted += queriesPerCycle;
+      aggregatedMetrics.rawResults += cycleRes.metrics.rawResults || 0;
+      aggregatedMetrics.uniqueResults += cycleRes.metrics.uniqueResults || 0;
+      aggregatedMetrics.linkHealthChecked += cycleRes.metrics.linkHealthChecked || 0;
+      aggregatedMetrics.linkHealthPassed += cycleRes.metrics.linkHealthPassed || 0;
+      aggregatedMetrics.linkHealthFailed += cycleRes.metrics.linkHealthFailed || 0;
+      aggregatedMetrics.pageValidityChecked += cycleRes.metrics.pageValidityChecked || 0;
+      aggregatedMetrics.pageValidityPassed += cycleRes.metrics.pageValidityPassed || 0;
+      aggregatedMetrics.pageValidityFailed += cycleRes.metrics.pageValidityFailed || 0;
+      aggregatedMetrics.pageFetchAttempts += cycleRes.metrics.pageFetchAttempts || 0;
+      aggregatedMetrics.pageFetchSuccesses += cycleRes.metrics.pageFetchSuccesses || 0;
+      aggregatedMetrics.pageFetchFailures += cycleRes.metrics.pageFetchFailures || 0;
+      aggregatedMetrics.verificationCacheHits += cycleRes.metrics.verificationCacheHits || 0;
+      aggregatedMetrics.verificationCacheMisses += cycleRes.metrics.verificationCacheMisses || 0;
+      aggregatedMetrics.deepCrawled += cycleRes.metrics.deepCrawled || 0;
+      aggregatedMetrics.qualifiedProjects += cycleRes.metrics.qualifiedProjects || 0;
+      aggregatedMetrics.contactableProjects += cycleRes.metrics.contactableProjects || 0;
+    }
+  }
+
+  const overallCrawlReductionRate = aggregatedMetrics.uniqueResults > 0
+    ? `${((1 - (aggregatedMetrics.deepCrawled / aggregatedMetrics.uniqueResults)) * 100).toFixed(1)}%`
+    : '0.0%';
+
+  console.log('\n================================================================');
+  console.log(`🏁 [PHASE E COMPLETE] AGGREGATED PRODUCTION DISCOVERY METRICS:`);
+  console.log(`   Cycles Executed                  : ${cycles.join(', ')}`);
+  console.log(`   Total Queries Run                : ${aggregatedMetrics.totalQueriesExecuted}`);
+  console.log(`   Total Raw Results                : ${aggregatedMetrics.rawResults}`);
+  console.log(`   Total Unique Results             : ${aggregatedMetrics.uniqueResults}`);
+  console.log(`   Link Health Checked / Passed     : ${aggregatedMetrics.linkHealthChecked} / ${aggregatedMetrics.linkHealthPassed}`);
+  console.log(`   Page Validity Checked / Passed   : ${aggregatedMetrics.pageValidityChecked} / ${aggregatedMetrics.pageValidityPassed}`);
+  console.log(`   Total Deep Crawled               : ${aggregatedMetrics.deepCrawled} (Crawl Reduction: ${overallCrawlReductionRate})`);
+  console.log(`   Total Qualified Leads Found      : ${aggregatedMetrics.qualifiedProjects}`);
+  console.log(`   Actionable Contactable Leads     : ${aggregatedMetrics.contactableProjects}`);
+  console.log(`   Persistence Status               : ${persistToDb && !auditOnly ? `SAVED TO SUPABASE (${allQualifiedProjects.length} leads)` : 'AUDIT ONLY (0 DB mutations)'}`);
+  console.log('================================================================\n');
+
+  return {
+    mode,
+    totalQueries,
+    cycles,
+    persistToDb: Boolean(persistToDb && !auditOnly),
+    auditOnly,
+    projects: allQualifiedProjects,
+    aggregatedMetrics,
+    cycleResults
+  };
+}
+
 if (process.argv[1]?.endsWith('runSearchAndDirectDiscovery.js')) {
   const isPilot = process.argv.includes('--pilot') || process.argv.includes('--phase-d');
-  const runner = isPilot ? runPhaseDPilot : runFullDiscoveryPipeline;
-  const config = isPilot ? {} : { cycle: 1, batchSize: 20, days: 30 };
+  const isScale = process.argv.includes('--scale') || process.argv.includes('--phase-e') || process.argv.includes('--production');
+  const shouldPersist = process.argv.includes('--persist');
 
-  runner(config)
-    .then(() => process.exit(0))
-    .catch(err => {
-      console.error('Fatal Discovery Pipeline Error:', err);
-      process.exit(1);
-    });
+  if (isPilot) {
+    runPhaseDPilot()
+      .then(() => process.exit(0))
+      .catch(err => {
+        console.error('Fatal Discovery Pipeline Error:', err);
+        process.exit(1);
+      });
+  } else if (isScale) {
+    const scaleArgIdx = process.argv.indexOf('--scale');
+    let totalQueries = 100;
+    if (scaleArgIdx !== -1 && process.argv[scaleArgIdx + 1] && !process.argv[scaleArgIdx + 1].startsWith('--')) {
+      const parsed = parseInt(process.argv[scaleArgIdx + 1], 10);
+      if (!isNaN(parsed) && parsed > 0) totalQueries = parsed;
+    }
+
+    runProductionScaledDiscovery({
+      totalQueries,
+      cycles: [1, 2, 3],
+      days: 30,
+      persistToDb: shouldPersist,
+      auditOnly: !shouldPersist
+    })
+      .then(() => process.exit(0))
+      .catch(err => {
+        console.error('Fatal Scaled Discovery Error:', err);
+        process.exit(1);
+      });
+  } else {
+    runFullDiscoveryPipeline({ cycle: 1, batchSize: 20, days: 30, persistToDb: shouldPersist, auditOnly: !shouldPersist })
+      .then(() => process.exit(0))
+      .catch(err => {
+        console.error('Fatal Discovery Pipeline Error:', err);
+        process.exit(1);
+      });
+  }
 }
