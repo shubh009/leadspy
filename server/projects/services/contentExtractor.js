@@ -117,12 +117,13 @@ export class ContentExtractor {
       contacts.email = validEmails[0];
     }
 
-    // Direct community/author profiles
-    if (url.includes('reddit.com/r/')) {
+    // Direct community/author profiles:
+    // Only assign if it is an actual user profile URL. Never assign post/issue URLs.
+    if (url.includes('reddit.com/user/')) {
       contacts.profileUrl = url;
-    } else if (url.includes('github.com/')) {
+    } else if (url.includes('github.com/') && !url.includes('/issues') && !url.includes('/pull') && !url.includes('/blob')) {
       contacts.profileUrl = url;
-    } else if (url.includes('news.ycombinator.com/item')) {
+    } else if (url.includes('twitter.com/') || url.includes('x.com/')) {
       contacts.profileUrl = url;
     }
 
@@ -222,7 +223,7 @@ export class ContentExtractor {
       rawTitle: pageTitle || targetItem.title,
       rawContent: `${pageTitle} | ${fullText}`,
       author: targetItem.author || contacts.email?.split('@')[0] || 'Direct Client',
-      authorProfileUrl: contacts.profileUrl || url,
+      authorProfileUrl: contacts.profileUrl || targetItem.authorProfileUrl || null,
       clientEmail: contacts.email,
       postedAt,
       discoveredAt: new Date().toISOString(),

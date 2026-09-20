@@ -526,8 +526,13 @@ Return ONLY a valid JSON object with NO MARKDOWN and NO BACKTICKS with the follo
     // 4. Public Profile Message (Reddit / GitHub / Twitter)
     let hasPublicProfileRoute = false;
     let authorProfileUrl = candidate.authorProfileUrl || null;
-    const author = candidate.author || '';
+    const author = (candidate.author || '').trim();
     const isGenericAuthor = !author || ['anonymous', '[deleted]', 'automoderator', 'unknown', 'direct client', 'web client', 'hn client', 'reddit client'].includes(author.toLowerCase());
+
+    // Sanitize: If authorProfileUrl accidentally contains a post/comment/issue path, discard it
+    if (authorProfileUrl && (authorProfileUrl.includes('/comments/') || authorProfileUrl.includes('/issues/') || authorProfileUrl.includes('/pull/') || authorProfileUrl.includes('ycombinator.com/item'))) {
+      authorProfileUrl = null;
+    }
 
     if (!isGenericAuthor) {
       if (candidate.source === 'reddit') {
