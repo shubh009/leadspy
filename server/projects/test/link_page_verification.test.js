@@ -203,3 +203,57 @@ test('🧪 TC-10: Working URL with completed project -> survives Link & Page val
 
   assert.equal(projectStatus, 'COMPLETED', 'Downstream layer correctly marks PROJECT_STATUS: COMPLETED');
 });
+
+test('🧪 TC-11: HTTP 429 -> triggers retry with backoff; recovers on success or marks RATE_LIMITED', async () => {
+  let callCount = 0;
+  // Mock fetch: returns 429 on first call, returns 200 on retry
+  const mockFetch = async () => {
+    callCount++;
+    if (callCount === 1) {
+      return { status: 429, url: 'https://reddit.com/r/forhire/comments/xyz', headers: new Map() };
+    }
+    return {
+      status: 200,
+      url: 'https://reddit.com/r/forhire/comments/xyz',
+      headers: new Map([['content-type', 'text/html']])
+    };
+  };
+
+  const candidate = {
+    url: 'https://reddit.com/r/forhire/comments/xyz',
+    snippet: 'Looking for a developer to build an MVP for our startup.'
+  };
+
+  const gateRes = await evaluateCandidateValidityGate(candidate, {
+    fetchFn: mockFetch,
+    maxRetries: 1,
+    retryDelayMs: 10
+  });
+
+  assert.equal(callCount, 2, 'Must retry upon encountering 429');
+  assert.equal(gateRes.healthReport.retry_count, 1, 'Retry count must be recorded');
+  assert.equal(gateRes.healthReport.health_status, LINK_HEALTH_STATUS.ACTIVE, 'Should recover to ACTIVE after successful retry');
+  assert.equal(gateRes.pass, true, 'Should pass gate after recovery');
+});
+
+test('🧪 TC-12: HTTP 403 -> marks BLOCKED without permanent source/domain penalty', async () => {
+  const mockFetch = async () => ({
+    status: 403,
+    url: 'https://protected-site.com/project-post',
+    headers: new Map()
+  });
+
+  const candidate = {
+    url: 'https://protected-site.com/project-post',
+    snippet: 'Need a team to build an e-commerce platform.'
+  };
+
+  const gateRes = await evaluateCandidateValidityGate(candidate, { fetchFn: mockFetch });
+
+  assert.equal(gateRes.pass, false, '403 candidate must not enter deep crawl queue');
+  assert.equal(gateRes.rejection_stage, 'LINK_HEALTH');
+  assert.equal(gateRes.rejection_reason, LINK_HEALTH_STATUS.BLOCKED);
+  assert.equal(gateRes.healthReport.is_dead, false, '403 must NOT be marked is_dead: true');
+  assert.equal(gateRes.healthReport.health_status, LINK_HEALTH_STATUS.BLOCKED);
+});
+

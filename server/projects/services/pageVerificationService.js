@@ -75,34 +75,47 @@ export async function verifyLinkHealth(url, options = {}) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-    // Attempt lightweight HEAD first; if provider forbids HEAD (405/501), fallback to streamed GET
-    let res;
-    try {
-      res = await fetchFn(url, {
-        method: 'HEAD',
-        headers: {
-          'User-Agent': 'LeadSpyBot/2.0 (+https://leadspy.app/crawler-verifier)'
-        },
-        redirect: 'follow',
-        signal: controller.signal
-      });
-      if (res.status === 405 || res.status === 501) {
-        throw new Error('HEAD_NOT_ALLOWED');
+    const maxRetries = options.maxRetries ?? 1;
+    const retryDelayMs = options.retryDelayMs ?? 100;
+    report.retry_count = 0;
+
+    const doFetch = async () => {
+      try {
+        const headRes = await fetchFn(url, {
+          method: 'HEAD',
+          headers: {
+            'User-Agent': 'LeadSpyBot/2.0 (+https://leadspy.app/crawler-verifier)'
+          },
+          redirect: 'follow',
+          signal: controller.signal
+        });
+        if (headRes.status === 405 || headRes.status === 501) {
+          throw new Error('HEAD_NOT_ALLOWED');
+        }
+        return headRes;
+      } catch (headErr) {
+        if (headErr.name === 'AbortError') throw headErr;
+        return await fetchFn(url, {
+          method: 'GET',
+          headers: {
+            'User-Agent': 'LeadSpyBot/2.0 (+https://leadspy.app/crawler-verifier)'
+          },
+          redirect: 'follow',
+          signal: controller.signal
+        });
       }
-    } catch (headErr) {
-      if (headErr.name === 'AbortError') throw headErr;
-      // Streamed GET fallback
-      res = await fetchFn(url, {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'LeadSpyBot/2.0 (+https://leadspy.app/crawler-verifier)'
-        },
-        redirect: 'follow',
-        signal: controller.signal
-      });
-    } finally {
-      clearTimeout(timeoutId);
+    };
+
+    let res = await doFetch();
+
+    // HTTP 429: Temporary rate limit handling with retry/backoff
+    while (res.status === 429 && report.retry_count < maxRetries) {
+      report.retry_count++;
+      await new Promise(r => setTimeout(r, retryDelayMs * (2 ** (report.retry_count - 1))));
+      res = await doFetch();
     }
+
+    clearTimeout(timeoutId);
 
     report.response_time_ms = Date.now() - startTime;
     report.http_status = res.status;
@@ -125,9 +138,13 @@ export async function verifyLinkHealth(url, options = {}) {
       report.is_accessible = false;
       report.health_status = LINK_HEALTH_STATUS.DEAD;
     } else if (res.status === 403) {
+      // 403 is BLOCKED without permanent source/domain penalty
+      report.is_dead = false;
       report.is_accessible = false;
       report.health_status = LINK_HEALTH_STATUS.BLOCKED;
     } else if (res.status === 429) {
+      // 429 remaining after retry is RATE_LIMITED
+      report.is_dead = false;
       report.is_accessible = false;
       report.health_status = LINK_HEALTH_STATUS.RATE_LIMITED;
     } else {
