@@ -419,19 +419,85 @@ export const CONTROLLED_QUERY_TEMPLATES = [
 ];
 
 /**
- * Deterministically generates a controlled set of 20 queries for a cycle
- * - 12 Targeted Combinatorial Queries
- * - 5 Platform Footprints
- * - 3 Exploratory Queries
+ * Deterministically generates a controlled set of queries for a cycle
+ * Driven by adaptive source allocation quotas (Reddit, Hacker News, Public Web)
+ * 
+ * @param {Object} options - { cycle, batchSize, sourceQuotas }
+ * @returns {Array<Object>} List of query objects
  */
-export function generateControlledCombinatorialQueries({ cycle = 1, batchSize = 20 } = {}) {
-  const queries = [];
+export function generateControlledCombinatorialQueries({ cycle = 1, batchSize = 20, sourceQuotas = null } = {}) {
   const { BUYER_INTENTS, PROJECT_STAGES, DELIVERABLES, BUSINESS_CONTEXTS } = COMBINATORIAL_DIMENSIONS;
-
   const cycleOffset = (cycle - 1) * 3;
 
-  // 1. 12 Targeted Combinatorial Queries
-  for (let i = 0; i < 12; i++) {
+  // Default quota if not supplied: balanced with 15% minimum floor
+  const quotas = sourceQuotas || {
+    reddit: Math.max(3, Math.round(batchSize * 0.30)),
+    hackernews: Math.max(3, Math.round(batchSize * 0.20)),
+    public_web: batchSize - Math.max(3, Math.round(batchSize * 0.30)) - Math.max(3, Math.round(batchSize * 0.20))
+  };
+
+  const redditQueries = [];
+  const hnQueries = [];
+  const webQueries = [];
+
+  // 1. Reddit Platform Footprints (quotas.reddit)
+  const subreddits = ['forhire', 'freelance_forhire', 'jobbit'];
+  for (let i = 0; i < quotas.reddit; i++) {
+    const sub = subreddits[i % subreddits.length];
+    const deliv = DELIVERABLES[(i + cycleOffset) % DELIVERABLES.length];
+    const qStr = (i === 0)
+      ? `site:reddit.com/r/${sub} "[Hiring]" "${deliv}"`
+      : (i % 2 === 0)
+        ? `site:reddit.com/r/${sub} "[Hiring]" MVP OR "custom software"`
+        : `site:reddit.com/r/${sub} "need developer" OR "looking to hire" ${deliv}`;
+
+    redditQueries.push(createQuery(qStr, {
+      priority: QUERY_PRIORITY.HIGH,
+      intentType: 'buyer_request',
+      deliverableType: deliv.toLowerCase().replace(/\s+/g, '_'),
+      sourceScope: 'reddit',
+      qualityTier: 'A',
+      category: 'footprint_reddit'
+    }));
+  }
+
+  // 2. Hacker News Platform Footprints (quotas.hackernews)
+  const hnFootprints = ['"SEEKING FREELANCER"', '"need someone to build"', '"looking for agency"'];
+  for (let i = 0; i < quotas.hackernews; i++) {
+    const fp = hnFootprints[i % hnFootprints.length];
+    const deliv = DELIVERABLES[(i + cycleOffset) % DELIVERABLES.length];
+    hnQueries.push(createQuery(`site:news.ycombinator.com ${fp} ${deliv}`, {
+      priority: QUERY_PRIORITY.HIGH,
+      intentType: 'buyer_request',
+      deliverableType: deliv.toLowerCase().replace(/\s+/g, '_'),
+      sourceScope: 'hackernews',
+      qualityTier: 'A',
+      category: 'footprint_hackernews'
+    }));
+  }
+
+  // 3. Public Web Combinatorial, RFP & Exploratory Queries (quotas.public_web)
+  let webCount = quotas.public_web;
+  // RFP query as part of public web
+  if (webCount > 0) {
+    const rfpDeliv = DELIVERABLES[(cycleOffset + 2) % DELIVERABLES.length];
+    webQueries.push(createQuery(`filetype:pdf "request for proposal" "${rfpDeliv}" 2026`, {
+      priority: QUERY_PRIORITY.HIGH,
+      intentType: 'rfp',
+      deliverableType: rfpDeliv.toLowerCase().replace(/\s+/g, '_'),
+      sourceScope: 'public_web',
+      qualityTier: 'A',
+      category: 'footprint_rfp'
+    }));
+    webCount--;
+  }
+
+  // Exploratory queries (at least 1, up to 3)
+  const exploratoryCount = Math.min(3, Math.max(1, Math.floor(webCount * 0.25)));
+  const targetedCount = webCount - exploratoryCount;
+
+  // Targeted Combinatorial queries
+  for (let i = 0; i < targetedCount; i++) {
     const intent = BUYER_INTENTS[(i + cycleOffset) % BUYER_INTENTS.length];
     const stage = PROJECT_STAGES[(i + cycleOffset) % PROJECT_STAGES.length];
     const deliv = DELIVERABLES[(i + cycleOffset) % DELIVERABLES.length];
@@ -441,7 +507,7 @@ export function generateControlledCombinatorialQueries({ cycle = 1, batchSize = 
       ? `"${intent}" ${deliv} ${ctx} ${NEGATIVE_SEARCH_OPERATORS}`
       : `"${intent}" ${stage} ${deliv} ${NEGATIVE_SEARCH_OPERATORS}`;
 
-    queries.push(createQuery(qStr, {
+    webQueries.push(createQuery(qStr, {
       priority: QUERY_PRIORITY.HIGH,
       intentType: 'buyer_request',
       deliverableType: deliv.toLowerCase().replace(/\s+/g, '_'),
@@ -451,63 +517,11 @@ export function generateControlledCombinatorialQueries({ cycle = 1, batchSize = 
     }));
   }
 
-  // 2. 5 Platform Footprints (Reddit, HN, RFP)
-  const fpDelivs = [
-    DELIVERABLES[(cycleOffset) % DELIVERABLES.length],
-    DELIVERABLES[(cycleOffset + 1) % DELIVERABLES.length],
-    DELIVERABLES[(cycleOffset + 2) % DELIVERABLES.length]
-  ];
-
-  queries.push(createQuery(`site:reddit.com/r/forhire "[Hiring]" ${fpDelivs[0]}`, {
-    priority: QUERY_PRIORITY.HIGH,
-    intentType: 'buyer_request',
-    deliverableType: fpDelivs[0].toLowerCase().replace(/\s+/g, '_'),
-    sourceScope: 'reddit',
-    qualityTier: 'A',
-    category: 'footprint_reddit'
-  }));
-
-  queries.push(createQuery(`site:reddit.com/r/freelance_forhire "[Hiring]" ${fpDelivs[1]}`, {
-    priority: QUERY_PRIORITY.HIGH,
-    intentType: 'buyer_request',
-    deliverableType: fpDelivs[1].toLowerCase().replace(/\s+/g, '_'),
-    sourceScope: 'reddit',
-    qualityTier: 'A',
-    category: 'footprint_reddit'
-  }));
-
-  queries.push(createQuery(`site:news.ycombinator.com "SEEKING FREELANCER" ${fpDelivs[0]}`, {
-    priority: QUERY_PRIORITY.HIGH,
-    intentType: 'buyer_request',
-    deliverableType: fpDelivs[0].toLowerCase().replace(/\s+/g, '_'),
-    sourceScope: 'hackernews',
-    qualityTier: 'A',
-    category: 'footprint_hackernews'
-  }));
-
-  queries.push(createQuery(`filetype:pdf "request for proposal" "${fpDelivs[2]}" 2026`, {
-    priority: QUERY_PRIORITY.HIGH,
-    intentType: 'rfp',
-    deliverableType: fpDelivs[2].toLowerCase().replace(/\s+/g, '_'),
-    sourceScope: 'public_web',
-    qualityTier: 'A',
-    category: 'footprint_rfp'
-  }));
-
-  queries.push(createQuery(`site:reddit.com/r/forhire "[Hiring]" MVP OR "custom software"`, {
-    priority: QUERY_PRIORITY.HIGH,
-    intentType: 'buyer_request',
-    deliverableType: 'saas_mvp',
-    sourceScope: 'reddit',
-    qualityTier: 'A',
-    category: 'footprint_reddit'
-  }));
-
-  // 3. 3 Exploratory Queries (15% allocation)
-  for (let i = 0; i < 3; i++) {
+  // Exploratory queries
+  for (let i = 0; i < exploratoryCount; i++) {
     const intent = BUYER_INTENTS[(i + cycleOffset + 4) % BUYER_INTENTS.length];
     const deliv = DELIVERABLES[(i + cycleOffset + 6) % DELIVERABLES.length];
-    queries.push(createQuery(`"${intent}" ${deliv} ${NEGATIVE_SEARCH_OPERATORS}`, {
+    webQueries.push(createQuery(`"${intent}" ${deliv} ${NEGATIVE_SEARCH_OPERATORS}`, {
       priority: QUERY_PRIORITY.MEDIUM,
       intentType: 'buyer_request',
       deliverableType: deliv.toLowerCase().replace(/\s+/g, '_'),
@@ -517,6 +531,8 @@ export function generateControlledCombinatorialQueries({ cycle = 1, batchSize = 
     }));
   }
 
-  return queries.slice(0, batchSize);
+  // Combine in prioritized balanced sequence
+  const combined = [...redditQueries, ...hnQueries, ...webQueries];
+  return combined.slice(0, batchSize);
 }
 

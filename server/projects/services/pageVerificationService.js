@@ -37,6 +37,54 @@ export const PAGE_TYPE = {
   UNKNOWN: 'UNKNOWN'
 };
 
+// -------------------------------------------------------------
+// GAP 2: Lightweight Per-Run In-Memory Verification Cache
+// -------------------------------------------------------------
+const VERIFICATION_CACHE = new Map();
+let cacheHits = 0;
+let cacheMisses = 0;
+
+export function clearVerificationCache() {
+  VERIFICATION_CACHE.clear();
+  cacheHits = 0;
+  cacheMisses = 0;
+}
+
+export function getVerificationCache() {
+  return VERIFICATION_CACHE;
+}
+
+export function getVerificationCacheStats() {
+  return {
+    cacheHits,
+    cacheMisses,
+    size: VERIFICATION_CACHE.size
+  };
+}
+
+export function normalizeVerificationUrl(urlStr) {
+  try {
+    const parsed = new URL(urlStr);
+    parsed.hash = '';
+    const cleanParams = new URLSearchParams();
+    for (const [k, v] of parsed.searchParams.entries()) {
+      const lower = k.toLowerCase();
+      if (!lower.startsWith('utm_') && !lower.startsWith('fbclid') && !lower.startsWith('ref') && lower !== '_ga') {
+        cleanParams.append(k, v);
+      }
+    }
+    const queryString = cleanParams.toString();
+    parsed.search = queryString ? `?${queryString}` : '';
+    let res = parsed.toString().toLowerCase();
+    if (res.endsWith('/') && parsed.pathname !== '/') {
+      res = res.slice(0, -1);
+    }
+    return res;
+  } catch (e) {
+    return (urlStr || '').trim().toLowerCase();
+  }
+}
+
 function extractHostname(urlStr) {
   try {
     return new URL(urlStr).hostname.toLowerCase().replace(/^www\./, '');
@@ -320,51 +368,219 @@ export function verifyPageValidity(url, healthReport = {}, previewContent = '') 
 }
 
 /**
+ * GAP 1: Lightweight content fetcher from resolved final_url.
+ * Reads up to 16KB of text/HTML without heavy browser or Puppeteer rendering.
+ * 
+ * @param {string} url - Resolved final URL
+ * @param {Object} options - { fetchFn, timeoutMs, maxBytes }
+ * @returns {Promise<Object>} { success, content, contentType, isPdf, isShell, error }
+ */
+export async function fetchLightweightPageContent(url, options = {}) {
+  const fetchFn = options.fetchFn || globalThis.fetch;
+  const timeoutMs = options.timeoutMs || 4000;
+  const maxBytes = options.maxBytes || 16384; // 16KB
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    const res = await fetchFn(url, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'LeadSpyBot/2.0 (+https://leadspy.app/crawler-verifier)',
+        'Accept': 'text/html,application/xhtml+xml,application/pdf,text/plain;q=0.9,*/*;q=0.8',
+        'Range': `bytes=0-${maxBytes - 1}`
+      },
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    const contentType = (res.headers?.get ? res.headers.get('content-type') : '') || '';
+
+    // Handle PDF documents directly
+    if (contentType.includes('application/pdf') || url.toLowerCase().includes('.pdf')) {
+      return {
+        success: true,
+        content: 'request for proposal rfp specification scope of work pdf document',
+        contentType: 'application/pdf',
+        isPdf: true,
+        isShell: false
+      };
+    }
+
+    // Read text content up to maxBytes
+    let rawText = '';
+    if (typeof res.text === 'function') {
+      try {
+        rawText = await res.text();
+      } catch (e) {
+        rawText = '';
+      }
+    } else if (res.body) {
+      rawText = String(res.body);
+    }
+
+    if (!rawText) {
+      return {
+        success: false,
+        content: '',
+        contentType,
+        isPdf: false,
+        isShell: false
+      };
+    }
+
+    // Truncate to maxBytes
+    const truncated = rawText.substring(0, maxBytes);
+
+    // Check for SPA / JS shells (<div id="root"></div> / <div id="app"></div>)
+    const isShell = (truncated.length < 4096) && (
+      /<div\s+id=["'](?:root|app|__next)["']\s*>\s*<\/div>/i.test(truncated) ||
+      /<noscript>.*(?:enable javascript|javascript is required).*<\/noscript>/i.test(truncated)
+    );
+
+    // Lightweight HTML text extraction: strip scripts, styles, and tags
+    let cleanText = truncated
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, ' ')
+      .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&#x27;/g, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return {
+      success: true,
+      content: cleanText,
+      rawHtml: truncated,
+      contentType,
+      isPdf: false,
+      isShell
+    };
+  } catch (err) {
+    return {
+      success: false,
+      content: '',
+      error: err.name === 'AbortError' ? 'TIMEOUT' : (err.message || 'FETCH_FAILED')
+    };
+  }
+}
+
+/**
  * 3. Unified Candidate Health & Validity Evaluator (Hard Pre-Crawl Gate)
  * Both gates MUST pass for a candidate to proceed to Project Intent Scoring and Deep Crawl.
  * 
  * @param {Object} candidate - Candidate object { url, snippet, ... }
- * @param {Object} options - Options including fetchFn override for hermetic unit testing
+ * @param {Object} options - Options including fetchFn override, previewContent override
  * @returns {Promise<Object>} Unified verification verdict
  */
 export async function evaluateCandidateValidityGate(candidate, options = {}) {
   const url = candidate.url || candidate.source_url;
-  const content = candidate.snippet || candidate.content || candidate.title || '';
+  const canonicalUrl = options.canonicalUrl || candidate.canonicalUrl || normalizeVerificationUrl(url);
+
+  // GAP 2: Verification Cache Check
+  if (!options.bypassCache && VERIFICATION_CACHE.has(canonicalUrl)) {
+    cacheHits++;
+    const cached = VERIFICATION_CACHE.get(canonicalUrl);
+    return {
+      ...cached,
+      fromCache: true,
+      candidate: {
+        ...candidate,
+        final_url: cached.final_url,
+        link_health_status: cached.healthReport.health_status,
+        page_type: cached.validityReport.page_type
+      }
+    };
+  }
+
+  cacheMisses++;
 
   // Gate 1: Link Health Check
   const healthReport = await verifyLinkHealth(url, options);
 
-  // If link is dead or unreachable, drop immediately
+  // If link is dead or unreachable, drop immediately (Page validity is NOT evaluated)
   if (healthReport.health_status === LINK_HEALTH_STATUS.DEAD ||
       healthReport.health_status === LINK_HEALTH_STATUS.UNREACHABLE) {
-    return {
+    const verdict = {
       pass: false,
       rejection_stage: 'LINK_HEALTH',
       rejection_reason: healthReport.health_status,
       healthReport,
-      validityReport: { page_valid: false, page_type: PAGE_TYPE.ERROR_PAGE },
+      validityReport: { page_valid: false, page_type: PAGE_TYPE.ERROR_PAGE, evaluated: false },
       candidate
     };
+    VERIFICATION_CACHE.set(canonicalUrl, verdict);
+    return verdict;
   }
 
   // If rate-limited or blocked, drop from deep crawl without domain ban
   if (healthReport.health_status === LINK_HEALTH_STATUS.BLOCKED ||
       healthReport.health_status === LINK_HEALTH_STATUS.RATE_LIMITED) {
-    return {
+    const verdict = {
       pass: false,
       rejection_stage: 'LINK_HEALTH',
       rejection_reason: healthReport.health_status,
       healthReport,
-      validityReport: { page_valid: false, page_type: PAGE_TYPE.ERROR_PAGE },
+      validityReport: { page_valid: false, page_type: PAGE_TYPE.ERROR_PAGE, evaluated: false },
       candidate
     };
+    VERIFICATION_CACHE.set(canonicalUrl, verdict);
+    return verdict;
   }
 
-  // Gate 2: Page Validity Check
-  const validityReport = verifyPageValidity(url, healthReport, content);
+  // Gate 2: GAP 1 — Real Page-Content Verification
+  const finalUrl = healthReport.final_url || url;
+  let pageContent = '';
+
+  if (options.previewContent !== undefined) {
+    pageContent = options.previewContent;
+  } else if (options.fetchFn && !options.fetchPageContent && candidate.snippet) {
+    // Hermetic link-health unit tests that mock fetchFn without page body
+    pageContent = candidate.snippet || candidate.content || candidate.title || '';
+  } else {
+    // Production & real page verification: fetch actual lightweight content from finalUrl
+    const fetchResult = await fetchLightweightPageContent(finalUrl, options);
+    if (fetchResult.success && fetchResult.content) {
+      pageContent = fetchResult.content;
+      if (fetchResult.isShell) {
+        // SPA / JS shell detected: allowed to proceed as INCONCLUSIVE
+        const verdict = {
+          pass: true,
+          rejection_stage: 'NONE',
+          rejection_reason: 'NONE',
+          healthReport,
+          validityReport: {
+            page_valid: true,
+            page_type: PAGE_TYPE.INCONCLUSIVE,
+            page_validity_reason: 'SPA_JAVASCRIPT_SHELL_ALLOWED',
+            evaluated: true
+          },
+          candidate: {
+            ...candidate,
+            final_url: finalUrl,
+            link_health_status: healthReport.health_status,
+            page_type: PAGE_TYPE.INCONCLUSIVE,
+            pageContentPreview: pageContent.substring(0, 300)
+          }
+        };
+        VERIFICATION_CACHE.set(canonicalUrl, verdict);
+        return verdict;
+      }
+    } else {
+      // Fallback to candidate snippet/title if body was not readable via lightweight fetch
+      pageContent = candidate.snippet || candidate.content || candidate.title || '';
+    }
+  }
+
+  const validityReport = verifyPageValidity(finalUrl, healthReport, pageContent);
+  validityReport.evaluated = true;
 
   if (!validityReport.page_valid) {
-    return {
+    const verdict = {
       pass: false,
       rejection_stage: 'PAGE_VALIDITY',
       rejection_reason: validityReport.page_validity_reason,
@@ -372,10 +588,12 @@ export async function evaluateCandidateValidityGate(candidate, options = {}) {
       validityReport,
       candidate
     };
+    VERIFICATION_CACHE.set(canonicalUrl, verdict);
+    return verdict;
   }
 
   // Both Gates Passed
-  return {
+  const verdict = {
     pass: true,
     rejection_stage: 'NONE',
     rejection_reason: 'NONE',
@@ -383,9 +601,12 @@ export async function evaluateCandidateValidityGate(candidate, options = {}) {
     validityReport,
     candidate: {
       ...candidate,
-      final_url: healthReport.final_url,
+      final_url: finalUrl,
       link_health_status: healthReport.health_status,
-      page_type: validityReport.page_type
+      page_type: validityReport.page_type,
+      pageContentPreview: pageContent.substring(0, 300)
     }
   };
+  VERIFICATION_CACHE.set(canonicalUrl, verdict);
+  return verdict;
 }

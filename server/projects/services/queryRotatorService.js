@@ -110,7 +110,45 @@ export class QueryRotatorService {
     for (const src of defaultSources) {
       normalized[src] = Number((rawScores[src] / totalScore).toFixed(3));
     }
+
+    // Ensure rounding equals exactly 1.000 (deterministic fix)
+    const sum = Number((normalized.reddit + normalized.hackernews + normalized.public_web).toFixed(3));
+    const diff = Number((1.0 - sum).toFixed(3));
+    if (diff !== 0) {
+      normalized.public_web = Number((normalized.public_web + diff).toFixed(3));
+    }
+
     return normalized;
+  }
+
+  /**
+   * Computes integer query quotas per source guaranteeing sum equals batchSize
+   * @param {Object} sourceMetrics
+   * @param {number} batchSize
+   * @returns {Object} { reddit: number, hackernews: number, public_web: number }
+   */
+  static calculateSourceQuotas(sourceMetrics = {}, batchSize = 20) {
+    const weights = QueryRotatorService.computeSourceAllocation(sourceMetrics);
+    const minFloor = Math.max(2, Math.floor(batchSize * 0.15));
+
+    let redditCount = Math.max(minFloor, Math.round(batchSize * weights.reddit));
+    let hnCount = Math.max(minFloor, Math.round(batchSize * weights.hackernews));
+    let webCount = batchSize - redditCount - hnCount;
+
+    if (webCount < minFloor) {
+      webCount = minFloor;
+      if (redditCount >= hnCount) {
+        redditCount = batchSize - hnCount - webCount;
+      } else {
+        hnCount = batchSize - redditCount - webCount;
+      }
+    }
+
+    return {
+      reddit: redditCount,
+      hackernews: hnCount,
+      public_web: webCount
+    };
   }
 
   /**
@@ -123,9 +161,15 @@ export class QueryRotatorService {
     const cycleNum = options.cycle || 1;
     const mode = options.mode || DISCOVERY_MODE.STANDARD;
 
-    // STEP-1 V2: Controlled Combinatorial Queries with platform footprints
+    // STEP-1 V2: Controlled Combinatorial Queries with platform footprints & adaptive source allocation
     if (options.useCombinatorial !== false && !options.categories && !options.siteFilter && mode !== DISCOVERY_MODE.HIGH_INTENT) {
-      return generateControlledCombinatorialQueries({ cycle: cycleNum, batchSize });
+      const sourceMetrics = options.sourceMetrics || this.config.sourceMetrics || {};
+      const sourceQuotas = QueryRotatorService.calculateSourceQuotas(sourceMetrics, batchSize);
+      return generateControlledCombinatorialQueries({
+        cycle: cycleNum,
+        batchSize,
+        sourceQuotas
+      });
     }
 
     const candidateQueries = [];

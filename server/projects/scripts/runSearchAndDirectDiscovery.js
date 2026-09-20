@@ -23,7 +23,12 @@ import { ContentExtractor } from '../services/contentExtractor.js';
 import { ProjectClassifier } from '../ai/projectClassifier.js';
 import { CanonicalDeduplicator } from '../services/canonicalDeduplicator.js';
 import { saveMasterProjects } from '../services/projectDbService.js';
-import { evaluateCandidateValidityGate, LINK_HEALTH_STATUS, PAGE_TYPE } from '../services/pageVerificationService.js';
+import {
+  evaluateCandidateValidityGate,
+  getVerificationCacheStats,
+  LINK_HEALTH_STATUS,
+  PAGE_TYPE
+} from '../services/pageVerificationService.js';
 
 function getCandidateRootDomain(urlStr) {
   try {
@@ -479,10 +484,15 @@ export async function runFullDiscoveryPipeline(config = {}) {
   // -------------------------------------------------------------
   console.log(`\n🛡️ Running Link Health & Page Validity Gate on ${rawCandidatePool.length} unique candidates...`);
 
+  const linkHealthChecked = rawCandidatePool.length;
   let linkHealthPassed = 0;
   let linkHealthFailed = 0;
+  let pageValidityChecked = 0;
   let pageValidityPassed = 0;
   let pageValidityFailed = 0;
+  let pageFetchAttempts = 0;
+  let pageFetchSuccesses = 0;
+  let pageFetchFailures = 0;
   const verificationRejections = {};
   const verifiedCandidatePool = [];
 
@@ -515,22 +525,43 @@ export async function runFullDiscoveryPipeline(config = {}) {
     const gateRes = gateResults[i];
     const stat = queryStatsMap.get(item.search_query);
 
-    if (gateRes && gateRes.pass) {
-      linkHealthPassed++;
-      pageValidityPassed++;
-      verifiedCandidatePool.push({
-        ...item,
-        final_url: gateRes.candidate.final_url || item.url,
-        link_health_status: gateRes.candidate.link_health_status,
-        page_type: gateRes.candidate.page_type,
-        verificationGate: gateRes
-      });
-    } else {
-      const stage = gateRes?.rejection_stage || 'LINK_HEALTH';
-      const reason = gateRes?.rejection_reason || 'UNREACHABLE';
-      if (stage === 'LINK_HEALTH') linkHealthFailed++;
-      else pageValidityFailed++;
+    if (!gateRes) continue;
 
+    // Check Link Health
+    if (gateRes.healthReport && gateRes.healthReport.is_accessible) {
+      linkHealthPassed++;
+      // Gate 2: Page Validity was evaluated
+      pageValidityChecked++;
+      pageFetchAttempts++;
+
+      if (gateRes.candidate?.pageContentPreview || gateRes.pass) {
+        pageFetchSuccesses++;
+      } else {
+        pageFetchFailures++;
+      }
+
+      if (gateRes.validityReport && gateRes.validityReport.page_valid) {
+        pageValidityPassed++;
+        verifiedCandidatePool.push({
+          ...item,
+          final_url: gateRes.candidate.final_url || item.url,
+          link_health_status: gateRes.candidate.link_health_status,
+          page_type: gateRes.candidate.page_type,
+          verificationGate: gateRes
+        });
+      } else {
+        pageValidityFailed++;
+        const reason = gateRes.rejection_reason || 'INVALID_PAGE';
+        verificationRejections[reason] = (verificationRejections[reason] || 0) + 1;
+        if (stat) {
+          stat.preFilterRejected++;
+          stat.rejectionReasons[reason] = (stat.rejectionReasons[reason] || 0) + 1;
+        }
+      }
+    } else {
+      // Link health failed: page validity was NOT evaluated
+      linkHealthFailed++;
+      const reason = gateRes.rejection_reason || 'UNREACHABLE';
       verificationRejections[reason] = (verificationRejections[reason] || 0) + 1;
       if (stat) {
         stat.preFilterRejected++;
@@ -539,8 +570,11 @@ export async function runFullDiscoveryPipeline(config = {}) {
     }
   }
 
-  console.log(`   -> Link Health: ${linkHealthPassed} Passed | ${linkHealthFailed} Failed`);
-  console.log(`   -> Page Validity: ${pageValidityPassed} Passed | ${pageValidityFailed} Failed`);
+  const cacheStats = getVerificationCacheStats();
+
+  console.log(`   -> Link Health: Checked: ${linkHealthChecked} | Passed: ${linkHealthPassed} | Failed: ${linkHealthFailed}`);
+  console.log(`   -> Page Validity: Checked: ${pageValidityChecked} | Passed: ${pageValidityPassed} | Failed: ${pageValidityFailed}`);
+  console.log(`   -> Verification Cache: Hits: ${cacheStats.cacheHits} | Misses: ${cacheStats.cacheMisses}`);
   console.log(`   -> Candidates Surviving Verification Gate: ${verifiedCandidatePool.length}`);
 
   // -------------------------------------------------------------
@@ -720,8 +754,9 @@ export async function runFullDiscoveryPipeline(config = {}) {
   console.log(`📊 COMPLETE RETRIEVAL FUNNEL & EFFICIENCY METRICS [MODE: ${mode.toUpperCase()}]:`);
   console.log(`   Raw Search Results               : ${dedupMetrics.rawResults}`);
   console.log(`   Unique Search Results            : ${totalEvaluated}`);
-  console.log(`   Link Health Passed / Failed      : ${linkHealthPassed} / ${linkHealthFailed}`);
-  console.log(`   Page Validity Passed / Failed    : ${pageValidityPassed} / ${pageValidityFailed}`);
+  console.log(`   Link Health Checked / Passed     : ${linkHealthChecked} / ${linkHealthPassed} (Failed: ${linkHealthFailed})`);
+  console.log(`   Page Validity Checked / Passed   : ${pageValidityChecked} / ${pageValidityPassed} (Failed: ${pageValidityFailed})`);
+  console.log(`   Verification Cache Hits / Misses : ${cacheStats.cacheHits} / ${cacheStats.cacheMisses}`);
   console.log(`   Candidate State Breakdown        :`, candidateStateCounts);
   console.log(`   Pre-Filter Accepted              : ${totalPreFilterAccepted}`);
   console.log(`   Pre-Filter Rejected (Zero Crawl) : ${totalPreFilterRejected}`);
@@ -777,10 +812,17 @@ export async function runFullDiscoveryPipeline(config = {}) {
     metrics: {
       rawResults: dedupMetrics.rawResults,
       uniqueResults: totalEvaluated,
+      linkHealthChecked,
       linkHealthPassed,
       linkHealthFailed,
+      pageValidityChecked,
       pageValidityPassed,
       pageValidityFailed,
+      pageFetchAttempts,
+      pageFetchSuccesses,
+      pageFetchFailures,
+      verificationCacheHits: cacheStats.cacheHits,
+      verificationCacheMisses: cacheStats.cacheMisses,
       candidateStates: candidateStateCounts,
       preFilterAccepted: totalPreFilterAccepted,
       preFilterRejected: totalPreFilterRejected,
@@ -800,8 +842,28 @@ export async function runFullDiscoveryPipeline(config = {}) {
   };
 }
 
+/**
+ * GAP 4: Phase D 20-Query Controlled Pilot Runner (Audit Only)
+ * Guarantees cycle=1, batchSize=20, persistToDb=false, auditOnly=true
+ */
+export async function runPhaseDPilot(options = {}) {
+  console.log('🏁 [PHASE D PILOT] Initializing 1 controlled cycle of exactly 20 queries (Audit Mode, 0 DB persistence)...');
+  return runFullDiscoveryPipeline({
+    cycle: 1,
+    batchSize: 20,
+    days: 30,
+    persistToDb: false,
+    auditOnly: true,
+    ...options
+  });
+}
+
 if (process.argv[1]?.endsWith('runSearchAndDirectDiscovery.js')) {
-  runFullDiscoveryPipeline({ cycle: 1, batchSize: 15, days: 30 })
+  const isPilot = process.argv.includes('--pilot') || process.argv.includes('--phase-d');
+  const runner = isPilot ? runPhaseDPilot : runFullDiscoveryPipeline;
+  const config = isPilot ? {} : { cycle: 1, batchSize: 20, days: 30 };
+
+  runner(config)
     .then(() => process.exit(0))
     .catch(err => {
       console.error('Fatal Discovery Pipeline Error:', err);
