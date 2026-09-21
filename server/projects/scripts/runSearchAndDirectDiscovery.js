@@ -35,10 +35,17 @@ import {
   PAGE_TYPE
 } from '../services/pageVerificationService.js';
 
-export function exportFunnelAuditCSVs({ rawCandidatePool = [], droppedCandidates = [], highIntentApprovedCandidates = [], qualifiedProjects = [] }) {
+export function exportFunnelAuditCSVs({
+  preNetworkApprovedCandidates = [],
+  droppedCandidates = [],
+  qualifiedProjects = [],
+  rawCandidatePool = [],
+  highIntentApprovedCandidates = []
+}) {
   const exportDirs = [
     process.cwd(),
-    '/Users/shubh/Downloads/leadspy_search_engine_files'
+    '/Users/shubh/Downloads/leadspy_search_engine_files',
+    '/Users/shubh/Downloads'
   ];
 
   for (const dir of exportDirs) {
@@ -55,74 +62,103 @@ export function exportFunnelAuditCSVs({ rawCandidatePool = [], droppedCandidates
     return `"${str}"`;
   }
 
-  // 1. Raw SERP Links
-  const csv1Headers = ['search_query', 'source', 'url', 'title', 'snippet', 'discovered_at'];
+  // 1. CSV 1: Pre-Network Approved Candidates (Gate 0 + Dedup + Pre-Crawl Score passed)
+  const approvedList = preNetworkApprovedCandidates.length > 0
+    ? preNetworkApprovedCandidates
+    : (highIntentApprovedCandidates.length > 0 ? highIntentApprovedCandidates : rawCandidatePool.filter(c => c.preCrawlEval?.decision === 'accept'));
+
+  const csv1Headers = [
+    'title',
+    'url',
+    'canonical_url',
+    'source',
+    'matched_queries',
+    'query_count',
+    'score',
+    'positive_signals',
+    'negative_signals',
+    'source_scope',
+    'intent_type',
+    'deliverable_type',
+    'quality_tier'
+  ];
   const csv1Rows = [csv1Headers.join(',')];
-  for (const item of rawCandidatePool) {
+  for (const item of approvedList) {
+    const meta = item.queryContext || {};
     csv1Rows.push([
-      escapeCsvCell(item.search_query),
-      escapeCsvCell(item.source),
-      escapeCsvCell(item.url),
       escapeCsvCell(item.title),
-      escapeCsvCell(item.snippet),
-      escapeCsvCell(item.discovered_at)
+      escapeCsvCell(item.url),
+      escapeCsvCell(item.canonicalUrl || item.url),
+      escapeCsvCell(item.source),
+      escapeCsvCell(item.search_query),
+      escapeCsvCell(item.query_count || 1),
+      escapeCsvCell(item.preCrawlEval?.score ?? item.score ?? 0),
+      escapeCsvCell((item.preCrawlEval?.positiveSignals || []).join('; ')),
+      escapeCsvCell((item.preCrawlEval?.negativeSignals || []).join('; ')),
+      escapeCsvCell(meta.sourceScope || item.source || 'public_web'),
+      escapeCsvCell(meta.intentType || 'buyer_request'),
+      escapeCsvCell(meta.deliverableType || 'custom_software'),
+      escapeCsvCell(meta.qualityTier || item.priorityTier || 'B')
     ].join(','));
   }
 
-  // 2. In-Memory Dropped Links
-  const csv2Headers = ['search_query', 'source', 'url', 'title', 'score', 'candidate_state', 'rejection_reason', 'negative_signals'];
+  // 2. CSV 2: Dropped Audit (Every rejected candidate with exact gate and rejection reason)
+  const csv2Headers = ['url', 'title', 'source', 'gate', 'rejection_reason', 'timestamp'];
   const csv2Rows = [csv2Headers.join(',')];
   for (const item of droppedCandidates) {
     csv2Rows.push([
-      escapeCsvCell(item.search_query),
-      escapeCsvCell(item.source),
       escapeCsvCell(item.url),
       escapeCsvCell(item.title),
-      escapeCsvCell(item.preCrawlEval?.score ?? 0),
-      escapeCsvCell(item.preCrawlEval?.candidateState ?? item.candidateState ?? 'REJECT'),
-      escapeCsvCell(item.preCrawlEval?.rejectionReason || 'LOW_SCORE'),
-      escapeCsvCell((item.preCrawlEval?.negativeSignals || []).join('; '))
+      escapeCsvCell(item.source),
+      escapeCsvCell(item.gate || item.rejection_stage || 'PRE_CRAWL'),
+      escapeCsvCell(item.rejection_reason || item.preCrawlEval?.rejectionReason || 'LOW_SCORE'),
+      escapeCsvCell(item.timestamp || item.discovered_at || new Date().toISOString())
     ].join(','));
   }
 
-  // 3. High-Intent Network Approved Links
-  const csv3Headers = ['search_query', 'source', 'url', 'title', 'score', 'candidate_state', 'link_health_status', 'page_validity_status'];
+  // 3. CSV 3: Final Qualified Leads (Only leads that successfully passed full qualification pipeline)
+  const csv3Headers = [
+    'project_title',
+    'canonical_url',
+    'client_company',
+    'requirements',
+    'budget',
+    'tech_stack',
+    'freshness',
+    'contact_information',
+    'contact_type',
+    'qualification_score',
+    'final_confidence',
+    'outreach_pitch'
+  ];
   const csv3Rows = [csv3Headers.join(',')];
-  for (const item of highIntentApprovedCandidates) {
-    csv3Rows.push([
-      escapeCsvCell(item.search_query),
-      escapeCsvCell(item.source),
-      escapeCsvCell(item.url),
-      escapeCsvCell(item.title),
-      escapeCsvCell(item.preCrawlEval?.score ?? 0),
-      escapeCsvCell(item.candidateState ?? 'PROJECT_CANDIDATE'),
-      escapeCsvCell(item.linkHealthStatus || 'PASSED'),
-      escapeCsvCell(item.pageValidityStatus || 'PASSED')
-    ].join(','));
-  }
-
-  // 4. Valid Accessible Project Pages / Qualified Leads
-  const csv4Headers = ['id', 'project_title', 'client_company', 'canonical_url', 'qualification_score', 'key_requirements', 'estimated_budget', 'contact_channel', 'outreach_pitch'];
-  const csv4Rows = [csv4Headers.join(',')];
   for (const item of qualifiedProjects) {
-    csv4Rows.push([
-      escapeCsvCell(item.id || item.canonicalId),
+    csv3Rows.push([
       escapeCsvCell(item.project_title || item.title),
-      escapeCsvCell(item.client_company || item.company_name),
-      escapeCsvCell(item.canonical_url || item.canonicalUrl || item.url),
-      escapeCsvCell(item.qualification_score ?? item.score),
-      escapeCsvCell(Array.isArray(item.key_requirements) ? item.key_requirements.join('; ') : item.key_requirements),
-      escapeCsvCell(item.estimated_budget || item.budget_range),
-      escapeCsvCell(item.contact_channel || item.contact_email || item.contact_url),
-      escapeCsvCell(item.outreach_pitch || item.outreachPitchDraft)
+      escapeCsvCell(item.canonical_url || item.canonicalUrl || item.sourceUrl || item.url),
+      escapeCsvCell(item.client_company || item.company_name || 'Individual / Founder'),
+      escapeCsvCell(Array.isArray(item.key_requirements) ? item.key_requirements.join('; ') : (item.key_requirements || item.deliverable_summary || '')),
+      escapeCsvCell(item.estimated_budget || item.budget_range || 'Not specified'),
+      escapeCsvCell(Array.isArray(item.tech_stack) ? item.tech_stack.join(', ') : (item.tech_stack || '')),
+      escapeCsvCell(item.freshnessStatus || item.freshness || 'fresh'),
+      escapeCsvCell(item.contact_channel || item.contact_value || item.clientEmail || 'none'),
+      escapeCsvCell(item.contact_type || 'none'),
+      escapeCsvCell(item.qualification_score ?? item.score ?? 70),
+      escapeCsvCell(item.final_confidence ?? item.confidence ?? 80),
+      escapeCsvCell(item.outreach_pitch || item.outreach_pitch_draft || item.outreachPitchDraft || '')
     ].join(','));
   }
 
   const files = [
+    // Standard names per specification
+    { name: 'csv1_pre_network_approved.csv', content: csv1Rows.join('\n') },
+    { name: 'csv2_dropped_audit.csv', content: csv2Rows.join('\n') },
+    { name: 'csv3_final_qualified_leads.csv', content: csv3Rows.join('\n') },
+    // Backward-compatibility aliases
     { name: 'csv1_raw_serp_links.csv', content: csv1Rows.join('\n') },
     { name: 'csv2_in_memory_dropped_links.csv', content: csv2Rows.join('\n') },
-    { name: 'csv3_high_intent_network_approved_links.csv', content: csv3Rows.join('\n') },
-    { name: 'csv4_valid_accessible_project_pages.csv', content: csv4Rows.join('\n') }
+    { name: 'csv3_high_intent_network_approved_links.csv', content: csv1Rows.join('\n') },
+    { name: 'csv4_valid_accessible_project_pages.csv', content: csv3Rows.join('\n') }
   ];
 
   for (const file of files) {
@@ -130,12 +166,172 @@ export function exportFunnelAuditCSVs({ rawCandidatePool = [], droppedCandidates
       const targetPath = path.join(dir, file.name);
       try {
         fs.writeFileSync(targetPath, file.content, 'utf8');
-        console.log(`📁 Audit CSV saved: ${targetPath}`);
       } catch (err) {
         console.warn(`⚠️ Failed writing audit CSV to ${targetPath}:`, err.message);
       }
     }
   }
+  console.log(`📁 Audit CSVs exported successfully to: ${exportDirs.join(', ')}`);
+}
+
+/**
+ * GATE 0: Instant Ingestion Sanity Filter (Zero Network, Zero AI, Zero Dedup Cache)
+ * Evaluates candidate immediately upon raw SERP/source ingestion.
+ * 
+ * @param {Object} rawItem - { url, title, snippet, source }
+ * @returns {Object} { pass: boolean, gate: 'GATE_0', rejection_reason: string|null, category: string|null }
+ */
+export function evaluateGate0Sanity(rawItem) {
+  const url = (rawItem.url || rawItem.source_url || '').trim();
+  const title = (rawItem.title || '').trim();
+  const snippet = (rawItem.snippet || rawItem.content || '').trim();
+  const fullText = `${title} ${snippet}`;
+  const textLower = fullText.toLowerCase();
+
+  // 1. DOMAIN BLACKLIST
+  let domain = 'unknown';
+  let path = '';
+  try {
+    const parsed = new URL(url);
+    domain = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    path = parsed.pathname.toLowerCase();
+  } catch (e) {
+    domain = url.toLowerCase();
+  }
+
+  const blacklistedDomains = [
+    'dictionary.cambridge.org',
+    'merriam-webster.com',
+    'thefreedictionary.com',
+    'seeking.com',
+    'jooble.org',
+    'naukri.com',
+    'indeed.com',
+    'glassdoor.com',
+    'workindia.in',
+    'workindia.com',
+    'monster.com',
+    'simplyhired.com',
+    'ziprecruiter.com',
+    'upwork.com',
+    'fiverr.com',
+    'freelancer.com',
+    'peopleperhour.com',
+    'guru.com',
+    'toptal.com'
+  ];
+
+  if (blacklistedDomains.some(d => domain === d || domain.endsWith('.' + d))) {
+    return {
+      pass: false,
+      gate: 'GATE_0',
+      rejection_reason: `BLACKLISTED_DOMAIN: ${domain}`,
+      category: 'DOMAIN'
+    };
+  }
+
+  // LinkedIn Jobs check: linkedin.com/jobs
+  if (domain.includes('linkedin.com') && path.startsWith('/jobs')) {
+    return {
+      pass: false,
+      gate: 'GATE_0',
+      rejection_reason: 'LINKEDIN_JOBS_BOARD',
+      category: 'DOMAIN'
+    };
+  }
+
+  // 2. URL / PATH PATTERNS
+  const forbiddenPathPatterns = [
+    /^\/jobs(?:\/|$)/i,
+    /^\/job(?:\/|$)/i,
+    /^\/careers(?:\/|$)/i,
+    /^\/career(?:\/|$)/i,
+    /^\/vacancy(?:\/|$)/i,
+    /^\/hire(?:\/|$)/i,
+    /^\/freelance(?:\/|$)/i,
+    /^\/freelancers(?:\/|$)/i,
+    /^\/pricing(?:\/|$)/i,
+    /^\/features(?:\/|$)/i,
+    /^\/docs(?:\/|$)/i,
+    /^\/documentation(?:\/|$)/i,
+    /^\/blog(?:\/|$)/i,
+    /^\/category(?:\/|$)/i,
+    /^\/tag(?:\/|$)/i,
+    /^\/search(?:\/|$)/i
+  ];
+
+  for (const pattern of forbiddenPathPatterns) {
+    if (pattern.test(path)) {
+      return {
+        pass: false,
+        gate: 'GATE_0',
+        rejection_reason: `FORBIDDEN_PATH_PATTERN: ${path}`,
+        category: 'PATH'
+      };
+    }
+  }
+
+  // 3. SUPPLIER / SELF-PITCH SIGNALS
+  // Immediate drop for suppliers pitching themselves (freelancer available, looking for clients, portfolio)
+  const selfPitchPatterns = [
+    /\[for hire\]/i,
+    /\bfor hire\b/i,
+    /\bseeking work\b/i,
+    /\bhire me\b/i,
+    /\bmy portfolio\b/i,
+    /\bmy services\b/i,
+    /\bavailable for freelance\b/i,
+    /\bi am a developer\b/i,
+    /\bi offer development\b/i,
+    /\blooking for clients\b/i,
+    /\bfreelancer available\b/i,
+    /\bavailable for hire\b/i
+  ];
+
+  for (const pattern of selfPitchPatterns) {
+    if (pattern.test(fullText)) {
+      return {
+        pass: false,
+        gate: 'GATE_0',
+        rejection_reason: `SUPPLIER_SELF_PITCH: ${pattern.toString()}`,
+        category: 'SUPPLIER_SELF_PITCH'
+      };
+    }
+  }
+
+  // 4. EMPLOYMENT / CORPORATE JOB SIGNALS (Context-Aware)
+  // Contextual check: Do not reject if "salary" or "full-time" appears with clear software project context
+  const isSoftwareFeatureSalary = /salary\s*(calculation|module|component|system|slip|calculator|management)/i.test(fullText);
+  const isNegatedEmployment = /\b(not\s+(a\s+)?(salaried|full-time|employee|job|w2|employment|in-house)|no\s+(full-time|salaried)\s+(agencies|roles|developers|staff)?|not\s+hiring\s+(employees|staff|in-house))\b/i.test(fullText);
+
+  if (!isSoftwareFeatureSalary && !isNegatedEmployment) {
+    const hardEmploymentPatterns = [
+      /\bannual salary\b/i,
+      /\bctc\s*[:=]\b/i,
+      /\bbenefits include\b/i,
+      /\byears of experience required\b/i,
+      /\bfull[- ]time employee\b/i,
+      /\bpermanent role\b/i,
+      /\bresume\/cv submission\b/i,
+      /\bjoin our team\b/i,
+      /\bequal opportunity employer\b/i,
+      /\bw2 role\b/i,
+      /\bnotice period\b/i
+    ];
+
+    for (const pattern of hardEmploymentPatterns) {
+      if (pattern.test(fullText)) {
+        return {
+          pass: false,
+          gate: 'GATE_0',
+          rejection_reason: `EMPLOYMENT_SIGNAL: ${pattern.toString()}`,
+          category: 'EMPLOYMENT'
+        };
+      }
+    }
+  }
+
+  return { pass: true, gate: 'GATE_0', rejection_reason: null, category: null };
 }
 
 function getCandidateRootDomain(urlStr) {
@@ -585,23 +781,60 @@ export async function runFullDiscoveryPipeline(config = {}) {
     stat.rawResults++;
   }
 
+  let totalRawResultsIngested = 0;
+  let gate0PassedCount = 0;
+  let gate0RejectedCount = 0;
+
   function ingestCandidate(rawItem, queryContext = {}) {
+    totalRawResultsIngested++;
     if (rawCandidatePool.length >= maxRawLimit) return;
     trackFound(rawItem.search_query, rawItem.source);
 
-    // Pre-Classification Canonical Deduplication
-    const check = canonicalDeduplicator.checkUrlCandidate(rawItem);
-    if (!check.isDuplicate) {
-      const stat = queryStatsMap.get(rawItem.search_query);
-      if (stat) stat.uniqueResults++;
-
-      rawCandidatePool.push({
-        ...rawItem,
-        canonicalUrl: check.canonicalUrl || rawItem.url,
-        canonicalId: check.canonicalId || null,
-        queryContext
+    // GATE 0: Instant Ingestion Sanity Filter (Zero Network, Zero AI, Zero Dedup Cache)
+    const gate0Verdict = evaluateGate0Sanity(rawItem);
+    if (!gate0Verdict.pass) {
+      gate0RejectedCount++;
+      droppedCandidates.push({
+        url: rawItem.url || rawItem.source_url,
+        title: rawItem.title,
+        source: rawItem.source,
+        gate: 'GATE_0',
+        rejection_reason: gate0Verdict.rejection_reason,
+        timestamp: rawItem.discovered_at || new Date().toISOString()
       });
+      const stat = queryStatsMap.get(rawItem.search_query);
+      if (stat) {
+        stat.rejected++;
+        stat.rejectionReasons[gate0Verdict.rejection_reason] = (stat.rejectionReasons[gate0Verdict.rejection_reason] || 0) + 1;
+      }
+      return;
     }
+
+    gate0PassedCount++;
+
+    // Pre-Classification Canonical Deduplication (Executed ONLY on candidates passing Gate 0)
+    const check = canonicalDeduplicator.checkUrlCandidate(rawItem);
+    if (check.isDuplicate) {
+      droppedCandidates.push({
+        url: rawItem.url || rawItem.source_url,
+        title: rawItem.title,
+        source: rawItem.source,
+        gate: 'DEDUP',
+        rejection_reason: 'DUPLICATE_CANONICAL_URL',
+        timestamp: rawItem.discovered_at || new Date().toISOString()
+      });
+      return;
+    }
+
+    const stat = queryStatsMap.get(rawItem.search_query);
+    if (stat) stat.uniqueResults++;
+
+    rawCandidatePool.push({
+      ...rawItem,
+      canonicalUrl: check.canonicalUrl || rawItem.url,
+      canonicalId: check.canonicalId || null,
+      queryContext
+    });
   }
 
   // -------------------------------------------------------------
@@ -973,8 +1206,16 @@ export async function runFullDiscoveryPipeline(config = {}) {
         });
       } else {
         pageValidityFailed++;
-        const reason = gateRes.rejection_reason || 'INVALID_PAGE';
+        const reason = gateRes.rejection_reason || 'INSUFFICIENT_PAGE_CONTENT';
         verificationRejections[reason] = (verificationRejections[reason] || 0) + 1;
+        droppedCandidates.push({
+          url: item.url || item.source_url,
+          title: item.title,
+          source: item.source,
+          gate: 'PAGE_VALIDITY',
+          rejection_reason: reason,
+          timestamp: item.discovered_at || new Date().toISOString()
+        });
         if (stat) {
           stat.preFilterRejected++;
           stat.rejectionReasons[reason] = (stat.rejectionReasons[reason] || 0) + 1;
@@ -985,6 +1226,14 @@ export async function runFullDiscoveryPipeline(config = {}) {
       linkHealthFailed++;
       const reason = gateRes.rejection_reason || 'UNREACHABLE';
       verificationRejections[reason] = (verificationRejections[reason] || 0) + 1;
+      droppedCandidates.push({
+        url: item.url || item.source_url,
+        title: item.title,
+        source: item.source,
+        gate: 'HTTP',
+        rejection_reason: reason,
+        timestamp: item.discovered_at || new Date().toISOString()
+      });
       if (stat) {
         stat.preFilterRejected++;
         stat.rejectionReasons[reason] = (stat.rejectionReasons[reason] || 0) + 1;
@@ -1024,12 +1273,37 @@ export async function runFullDiscoveryPipeline(config = {}) {
           if (!extracted.postedAt && item.postedAt) extracted.postedAt = item.postedAt;
 
           enrichedCandidates.push(extracted);
+        } else {
+          droppedCandidates.push({
+            url: item.url || item.source_url,
+            title: item.title,
+            source: item.source,
+            gate: 'DEDUP',
+            rejection_reason: 'DUPLICATE_CONTENT_FINGERPRINT',
+            timestamp: item.discovered_at || new Date().toISOString()
+          });
         }
       } else {
         extractionFailures++;
+        droppedCandidates.push({
+          url: item.url || item.source_url,
+          title: item.title,
+          source: item.source,
+          gate: 'DEEP_CRAWL',
+          rejection_reason: 'EXTRACTION_EMPTY_CONTENT',
+          timestamp: item.discovered_at || new Date().toISOString()
+        });
       }
     } catch (err) {
       extractionFailures++;
+      droppedCandidates.push({
+        url: item.url || item.source_url,
+        title: item.title,
+        source: item.source,
+        gate: 'DEEP_CRAWL',
+        rejection_reason: `EXTRACTION_EXCEPTION: ${err.message}`,
+        timestamp: item.discovered_at || new Date().toISOString()
+      });
     }
   }
 
@@ -1072,6 +1346,14 @@ export async function runFullDiscoveryPipeline(config = {}) {
       rejectionReasons[reason] = (rejectionReasons[reason] || 0) + 1;
       if (reason === 'DUPLICATE') gate8Duplicates++;
       if (qStat) qStat.rejected++;
+      droppedCandidates.push({
+        url: candidate.url || candidate.sourceUrl || candidate.search_result_url,
+        title: candidate.title,
+        source: candidate.source,
+        gate: result.rejection_gate || 'QUALIFICATION',
+        rejection_reason: reason,
+        timestamp: candidate.discovered_at || new Date().toISOString()
+      });
     }
   }
 
@@ -1089,14 +1371,17 @@ export async function runFullDiscoveryPipeline(config = {}) {
   // -------------------------------------------------------------
   console.log('================================================================');
   console.log(`📊 COMPLETE RETRIEVAL FUNNEL & EFFICIENCY METRICS [MODE: ${mode.toUpperCase()}]:`);
-  console.log(`   Raw Search Results               : ${dedupMetrics.rawResults}`);
-  console.log(`   Unique Search Results            : ${totalEvaluated}`);
+  console.log(`   Raw Results Ingested             : ${totalRawResultsIngested}`);
+  console.log(`   Gate 0 Sanity Passed             : ${gate0PassedCount}`);
+  console.log(`   Gate 0 Sanity Rejected           : ${gate0RejectedCount}`);
+  console.log(`   Canonical Unique Candidates      : ${totalEvaluated}`);
+  console.log(`   Pre-Crawl Intent Accepted        : ${totalPreFilterAccepted}`);
+  console.log(`   Pre-Crawl Intent Rejected        : ${totalPreFilterRejected}`);
+  console.log(`   Approved for Verification        : ${approvedForVerification.length}`);
   console.log(`   Link Health Checked / Passed     : ${linkHealthChecked} / ${linkHealthPassed} (Failed: ${linkHealthFailed})`);
   console.log(`   Page Validity Checked / Passed   : ${pageValidityChecked} / ${pageValidityPassed} (Failed: ${pageValidityFailed})`);
   console.log(`   Verification Cache Hits / Misses : ${verificationCacheHits} / ${verificationCacheMisses}`);
   console.log(`   Candidate State Breakdown        :`, candidateStateCounts);
-  console.log(`   Pre-Filter Accepted              : ${totalPreFilterAccepted}`);
-  console.log(`   Pre-Filter Rejected (Zero Crawl) : ${totalPreFilterRejected}`);
   console.log(`   Crawl Cap Rejected (Per-Query)   : ${crawlCapRejectedByQuery}`);
   console.log(`   Deep Crawled (Promising URLs)    : ${verifiedCandidatePool.length}`);
   console.log(`   Extraction Failures              : ${extractionFailures}`);
@@ -1157,6 +1442,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
   }
 
   exportFunnelAuditCSVs({
+    preNetworkApprovedCandidates: scoredCandidates,
     rawCandidatePool,
     droppedCandidates,
     highIntentApprovedCandidates: approvedForVerification,
@@ -1170,8 +1456,10 @@ export async function runFullDiscoveryPipeline(config = {}) {
     contactableProjects,
     persistence: persistenceResult,
     metrics: {
-      rawResults: dedupMetrics.rawResults - initialRawResults,
+      rawResults: totalRawResultsIngested || (dedupMetrics.rawResults - initialRawResults),
       cumulativeRawResults: dedupMetrics.rawResults,
+      gate0Passed: gate0PassedCount,
+      gate0Rejected: gate0RejectedCount,
       uniqueResults: totalEvaluated,
       linkHealthChecked,
       linkHealthPassed,

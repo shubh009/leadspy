@@ -348,15 +348,40 @@ export function verifyPageValidity(url, healthReport = {}, previewContent = '') 
     return result;
   }
 
-  if (targetUrl.includes('.pdf') || textLower.includes('request for proposal') || textLower.includes('scope of work')) {
+  const isForum = domain.includes('forum') ||
+                  domain.includes('community.') ||
+                  targetUrl.includes('/t/') ||
+                  targetUrl.includes('/topic/') ||
+                  targetUrl.includes('/thread/');
+
+  if (isForum) {
+    result.page_type = PAGE_TYPE.FORUM_POST;
+    result.page_valid = true;
+    result.page_validity_reason = 'VALID_FORUM_POST';
+    return result;
+  }
+
+  if (domain.includes('github.com') && (targetUrl.includes('/issues') || targetUrl.includes('/discussions'))) {
+    result.page_type = PAGE_TYPE.PROJECT_PAGE;
+    result.page_valid = true;
+    result.page_validity_reason = 'VALID_GITHUB_PROJECT';
+    return result;
+  }
+
+  if (targetUrl.includes('.pdf') ||
+      targetUrl.includes('/rfp') ||
+      targetUrl.includes('/rfps') ||
+      textLower.includes('request for proposal') ||
+      textLower.includes('scope of work')) {
     result.page_type = PAGE_TYPE.RFP;
     result.page_valid = true;
     result.page_validity_reason = 'VALID_RFP_DOCUMENT';
     return result;
   }
 
-  // General readable page
-  if (text.length >= 80) {
+  // General readable page (Requires minimum usable content length >= 250 characters)
+  const minUsableTextLength = 250;
+  if (text.length >= minUsableTextLength) {
     result.page_type = PAGE_TYPE.PROJECT_PAGE;
     result.page_valid = true;
     result.page_validity_reason = 'VALID_READABLE_CONTENT_PAGE';
@@ -365,8 +390,8 @@ export function verifyPageValidity(url, healthReport = {}, previewContent = '') 
 
   // Default fallback
   result.page_type = PAGE_TYPE.UNKNOWN;
-  result.page_valid = text.length > 30;
-  result.page_validity_reason = result.page_valid ? 'MINIMAL_CONTENT_PAGE' : 'INSUFFICIENT_CONTENT';
+  result.page_valid = false;
+  result.page_validity_reason = 'INSUFFICIENT_PAGE_CONTENT';
   return result;
 }
 
@@ -524,6 +549,57 @@ export async function fetchLightweightPageContent(url, options = {}) {
 export async function evaluateCandidateValidityGate(candidate, options = {}) {
   const url = candidate.url || candidate.source_url;
   const canonicalUrl = options.canonicalUrl || candidate.canonicalUrl || normalizeVerificationUrl(url);
+
+  // Requirement 6: Native Reddit/HN/GitHub candidates with existing content payload bypass HTTP ping
+  const isNative = candidate.source === 'reddit' ||
+                   candidate.source === 'hackernews' ||
+                   candidate.source === 'github' ||
+                   candidate.isNativeSource ||
+                   options.isNativeSource;
+  const hasNativePayload = Boolean(candidate.snippet || candidate.content || candidate.title || candidate.body);
+
+  if (isNative && hasNativePayload && !options.forceNetwork) {
+    const nativeContent = (candidate.body || candidate.content || candidate.snippet || candidate.title || '').trim();
+    const validityReport = verifyPageValidity(url, { health_status: LINK_HEALTH_STATUS.ACTIVE, is_accessible: true, final_url: url }, nativeContent);
+    validityReport.evaluated = true;
+    const pass = validityReport.page_valid;
+
+    const verdict = {
+      pass,
+      fromCache: false,
+      rejection_stage: pass ? 'NONE' : 'PAGE_VALIDITY',
+      rejection_reason: pass ? 'NONE' : validityReport.page_validity_reason,
+      healthReport: {
+        original_url: url,
+        final_url: url,
+        http_status: 200,
+        redirect_count: 0,
+        response_time_ms: 0,
+        content_type: 'application/native-payload',
+        is_accessible: true,
+        is_dead: false,
+        health_status: 'NATIVE_SOURCE_VERIFIED',
+        health_checked_at: new Date().toISOString()
+      },
+      validityReport,
+      verificationTelemetry: {
+        cacheHit: false,
+        linkHealthFetchAttempted: false,
+        pageFetchAttempted: false,
+        pageFetchSucceeded: pass,
+        pageFetchFailed: !pass,
+        nativeBypass: true
+      },
+      candidate: {
+        ...candidate,
+        final_url: url,
+        link_health_status: 'NATIVE_SOURCE_VERIFIED',
+        page_type: validityReport.page_type,
+        pageContentPreview: nativeContent.substring(0, 300)
+      }
+    };
+    return verdict;
+  }
 
   // GAP 2: Verification Cache Check
   if (!options.bypassCache && VERIFICATION_CACHE.has(canonicalUrl)) {
