@@ -22,6 +22,8 @@ export const LINK_HEALTH_STATUS = {
   UNKNOWN: 'UNKNOWN'
 };
 
+export const HTTP_VERIFICATION_TIMEOUT_MS = 2000;
+
 export const PAGE_TYPE = {
   PROJECT_POST: 'PROJECT_POST',
   PROJECT_PAGE: 'PROJECT_PAGE',
@@ -106,8 +108,9 @@ function extractHostname(urlStr) {
  */
 export async function verifyLinkHealth(url, options = {}) {
   const fetchFn = options.fetchFn || globalThis.fetch;
-  const timeoutMs = options.timeoutMs || 4000;
+  const totalBudgetMs = options.timeoutMs ?? HTTP_VERIFICATION_TIMEOUT_MS;
   const startTime = Date.now();
+  const deadline = startTime + totalBudgetMs;
 
   const report = {
     original_url: url,
@@ -123,37 +126,43 @@ export async function verifyLinkHealth(url, options = {}) {
   };
 
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
     const maxRetries = options.maxRetries ?? 1;
     const retryDelayMs = options.retryDelayMs ?? 100;
     report.retry_count = 0;
 
-    const doFetch = async () => {
+    const executeFetchWithRemaining = async (method) => {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        const timeoutErr = new Error('HTTP_VERIFICATION_TIMEOUT');
+        timeoutErr.name = 'AbortError';
+        throw timeoutErr;
+      }
+      const stepController = new AbortController();
+      const stepTimeoutId = setTimeout(() => stepController.abort(), remainingMs);
       try {
-        const headRes = await fetchFn(url, {
-          method: 'HEAD',
+        return await fetchFn(url, {
+          method,
           headers: {
             'User-Agent': 'LeadSpyBot/2.0 (+https://leadspy.app/crawler-verifier)'
           },
           redirect: 'follow',
-          signal: controller.signal
+          signal: stepController.signal
         });
+      } finally {
+        clearTimeout(stepTimeoutId);
+      }
+    };
+
+    const doFetch = async () => {
+      try {
+        const headRes = await executeFetchWithRemaining('HEAD');
         if (headRes.status === 405 || headRes.status === 501) {
           throw new Error('HEAD_NOT_ALLOWED');
         }
         return headRes;
       } catch (headErr) {
-        if (headErr.name === 'AbortError') throw headErr;
-        return await fetchFn(url, {
-          method: 'GET',
-          headers: {
-            'User-Agent': 'LeadSpyBot/2.0 (+https://leadspy.app/crawler-verifier)'
-          },
-          redirect: 'follow',
-          signal: controller.signal
-        });
+        if (headErr.name === 'AbortError' || Date.now() >= deadline) throw headErr;
+        return await executeFetchWithRemaining('GET');
       }
     };
 
@@ -162,11 +171,13 @@ export async function verifyLinkHealth(url, options = {}) {
     // HTTP 429: Temporary rate limit handling with retry/backoff
     while (res.status === 429 && report.retry_count < maxRetries) {
       report.retry_count++;
-      await new Promise(r => setTimeout(r, retryDelayMs * (2 ** (report.retry_count - 1))));
+      const delay = retryDelayMs * (2 ** (report.retry_count - 1));
+      if (Date.now() + delay >= deadline) {
+        break;
+      }
+      await new Promise(r => setTimeout(r, delay));
       res = await doFetch();
     }
-
-    clearTimeout(timeoutId);
 
     report.response_time_ms = Date.now() - startTime;
     report.http_status = res.status;

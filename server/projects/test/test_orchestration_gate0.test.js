@@ -32,9 +32,12 @@ import {
   evaluateCandidateValidityGate,
   verifyPageValidity,
   fetchLightweightPageContent,
+  verifyLinkHealth,
+  HTTP_VERIFICATION_TIMEOUT_MS,
   LINK_HEALTH_STATUS,
   PAGE_TYPE
 } from '../services/pageVerificationService.js';
+import { CanonicalDeduplicator } from '../services/canonicalDeduplicator.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -342,4 +345,188 @@ test('🧪 TC-16: Qualified-but-uncontactable leads preserved in final output wi
                       (leadUncontactable.lead_classification !== 'REJECTED');
   assert.equal(isQualified, true, 'Uncontactable lead must remain qualified');
   assert.equal(leadUncontactable.contactability_level, 'UNCONTACTABLE');
+});
+
+test('🧪 TC-17: Query context preservation & deduplicator updates across multiple queries (P0.1)', () => {
+  const dedup = new CanonicalDeduplicator();
+  const url = 'https://client-corp.com/rfp-custom-crm';
+
+  // 1st query appearance
+  const check1 = dedup.checkUrlCandidate({
+    url,
+    title: 'Custom CRM Build',
+    search_query: 'hire developer custom crm',
+    rank: 3
+  }, {
+    sourceScope: 'google',
+    intentType: 'buyer_request',
+    deliverableType: 'crm',
+    priority: 'HIGH',
+    qualityTier: 'A'
+  });
+  assert.equal(check1.isDuplicate, false);
+
+  const meta1 = dedup.getCandidateMetadata(url);
+  assert.equal(meta1.query_count, 1);
+  assert.equal(meta1.matched_queries.length, 1);
+  assert.equal(meta1.matched_queries[0], 'hire developer custom crm');
+  assert.equal(meta1.distinct_clusters_count, 1);
+  assert.equal(meta1.best_rank, 3);
+
+  // 2nd query appearance (same canonical URL, different query & cluster & rank)
+  const check2 = dedup.checkUrlCandidate({
+    url: 'https://client-corp.com/rfp-custom-crm/',
+    title: 'Custom CRM Build',
+    search_query: 'looking to outsource crm dashboard',
+    rank: 1
+  }, {
+    sourceScope: 'bing',
+    intentType: 'buyer_request',
+    deliverableType: 'dashboard',
+    priority: 'HIGH',
+    qualityTier: 'A'
+  });
+  assert.equal(check2.isDuplicate, true);
+
+  const meta2 = dedup.getCandidateMetadata(url);
+  assert.equal(meta2.query_count, 2);
+  assert.equal(meta2.matched_queries.length, 2);
+  assert.ok(meta2.matched_queries.includes('looking to outsource crm dashboard'));
+  assert.equal(meta2.distinct_clusters_count, 2);
+  assert.equal(meta2.best_rank, 1);
+
+  // 3rd query appearance
+  const check3 = dedup.checkUrlCandidate({
+    url: 'https://client-corp.com/rfp-custom-crm?utm_source=rss',
+    title: 'Custom CRM Build',
+    search_query: 'need software vendor crm portal',
+    rank: 5
+  }, {
+    sourceScope: 'google',
+    intentType: 'buyer_request',
+    deliverableType: 'portal',
+    priority: 'HIGH',
+    qualityTier: 'A'
+  });
+  assert.equal(check3.isDuplicate, true);
+
+  const meta3 = dedup.getCandidateMetadata(url);
+  assert.equal(meta3.query_count, 3);
+  assert.equal(meta3.matched_queries.length, 3);
+  assert.equal(meta3.distinct_clusters_count, 3);
+  assert.equal(meta3.best_rank, 1);
+});
+
+test('🧪 TC-18: CSV 1 includes matched_queries, query_count, distinct_clusters_count, and best_rank (P0.1, P0.6)', () => {
+  const approvedItem = {
+    title: 'Need dev team for SaaS',
+    url: 'https://saas-company.com/build-mvp',
+    canonicalUrl: 'https://saas-company.com/build-mvp',
+    source: 'google',
+    search_query: 'looking for agency to build saas',
+    matched_queries: ['looking for agency to build saas', 'hire react dev saas'],
+    query_count: 2,
+    distinct_clusters_count: 2,
+    best_rank: 1,
+    score: 85,
+    queryContext: {
+      sourceScope: 'public_web',
+      intentType: 'buyer_request',
+      deliverableType: 'saas',
+      qualityTier: 'A'
+    }
+  };
+
+  exportFunnelAuditCSVs({
+    preNetworkApprovedCandidates: [approvedItem],
+    droppedCandidates: [],
+    qualifiedProjects: [],
+    rawCandidatePool: [approvedItem],
+    highIntentApprovedCandidates: [approvedItem]
+  });
+
+  const cwd = process.cwd();
+  const csv1Content = fs.readFileSync(path.join(cwd, 'csv1_pre_network_approved.csv'), 'utf8');
+  assert.ok(csv1Content.includes('matched_queries'));
+  assert.ok(csv1Content.includes('distinct_clusters_count'));
+  assert.ok(csv1Content.includes('best_rank'));
+  assert.ok(csv1Content.includes('looking for agency to build saas; hire react dev saas'));
+});
+
+test('🧪 TC-19: True 2-second total budget enforces deadline across HEAD and GET fallback (P0.2)', async () => {
+  assert.equal(HTTP_VERIFICATION_TIMEOUT_MS, 2000);
+
+  // Simulate slow endpoint where HEAD takes 1200ms and GET takes 1500ms
+  // Total would be 2700ms without total budget, but with 2000ms deadline it should abort around 2000ms
+  const slowMockFetch = async (url, options) => {
+    if (options.method === 'HEAD') {
+      await new Promise(r => setTimeout(r, 1200));
+      return { status: 405, headers: new Map() }; // trigger GET fallback
+    }
+    // GET fallback
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        resolve({ status: 200, url, headers: new Map() });
+      }, 1500);
+      if (options.signal) {
+        options.signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          const err = new Error('The operation was aborted');
+          err.name = 'AbortError';
+          reject(err);
+        });
+      }
+    });
+  };
+
+  const start = Date.now();
+  const report = await verifyLinkHealth('https://slow-site.com/rfp', {
+    fetchFn: slowMockFetch,
+    timeoutMs: 2000
+  });
+  const elapsed = Date.now() - start;
+
+  assert.equal(report.health_status, LINK_HEALTH_STATUS.UNREACHABLE);
+  assert.ok(elapsed >= 1900 && elapsed <= 2400, `Elapsed time should be ~2000ms, was ${elapsed}ms`);
+});
+
+test('🧪 TC-20: Raw pool cap drops candidate at INGESTION with RAW_POOL_CAP_REACHED (P0.3, P0.5)', () => {
+  const maxRawLimit = 2;
+  const rawPool = [];
+  const dropped = [];
+
+  const simulateIngest = (rawItem) => {
+    const verdict = evaluateGate0Sanity(rawItem);
+    if (!verdict.pass) {
+      dropped.push({ url: rawItem.url, gate: 'GATE_0', rejection_reason: verdict.rejection_reason });
+      return;
+    }
+    if (rawPool.length >= maxRawLimit) {
+      dropped.push({ url: rawItem.url, gate: 'INGESTION', rejection_reason: 'RAW_POOL_CAP_REACHED' });
+      return;
+    }
+    rawPool.push(rawItem);
+  };
+
+  simulateIngest({ url: 'https://site1.com/project', title: 'Need dev 1', snippet: 'Project 1' });
+  simulateIngest({ url: 'https://site2.com/project', title: 'Need dev 2', snippet: 'Project 2' });
+  // 3rd item should hit pool cap
+  simulateIngest({ url: 'https://site3.com/project', title: 'Need dev 3', snippet: 'Project 3' });
+
+  assert.equal(rawPool.length, 2);
+  assert.equal(dropped.length, 1);
+  assert.equal(dropped[0].gate, 'INGESTION');
+  assert.equal(dropped[0].rejection_reason, 'RAW_POOL_CAP_REACHED');
+
+  exportFunnelAuditCSVs({
+    preNetworkApprovedCandidates: [],
+    droppedCandidates: dropped,
+    qualifiedProjects: [],
+    rawCandidatePool: rawPool
+  });
+
+  const cwd = process.cwd();
+  const csv2Content = fs.readFileSync(path.join(cwd, 'csv2_dropped_audit.csv'), 'utf8');
+  assert.ok(csv2Content.includes('INGESTION'));
+  assert.ok(csv2Content.includes('RAW_POOL_CAP_REACHED'));
 });

@@ -74,6 +74,8 @@ export function exportFunnelAuditCSVs({
     'source',
     'matched_queries',
     'query_count',
+    'distinct_clusters_count',
+    'best_rank',
     'score',
     'positive_signals',
     'negative_signals',
@@ -85,13 +87,19 @@ export function exportFunnelAuditCSVs({
   const csv1Rows = [csv1Headers.join(',')];
   for (const item of approvedList) {
     const meta = item.queryContext || {};
+    const matchedQueriesStr = Array.isArray(item.matched_queries)
+      ? item.matched_queries.join('; ')
+      : (item.matched_queries || item.search_query || 'direct_source');
+
     csv1Rows.push([
       escapeCsvCell(item.title),
       escapeCsvCell(item.url),
       escapeCsvCell(item.canonicalUrl || item.url),
       escapeCsvCell(item.source),
-      escapeCsvCell(item.search_query),
+      escapeCsvCell(matchedQueriesStr),
       escapeCsvCell(item.query_count || 1),
+      escapeCsvCell(item.distinct_clusters_count || 1),
+      escapeCsvCell(item.best_rank || item.rank || 1),
       escapeCsvCell(item.preCrawlEval?.score ?? item.score ?? 0),
       escapeCsvCell((item.preCrawlEval?.positiveSignals || []).join('; ')),
       escapeCsvCell((item.preCrawlEval?.negativeSignals || []).join('; ')),
@@ -784,10 +792,10 @@ export async function runFullDiscoveryPipeline(config = {}) {
   let totalRawResultsIngested = 0;
   let gate0PassedCount = 0;
   let gate0RejectedCount = 0;
+  let rawPoolCapRejectedCount = 0;
 
   function ingestCandidate(rawItem, queryContext = {}) {
     totalRawResultsIngested++;
-    if (rawCandidatePool.length >= maxRawLimit) return;
     trackFound(rawItem.search_query, rawItem.source);
 
     // GATE 0: Instant Ingestion Sanity Filter (Zero Network, Zero AI, Zero Dedup Cache)
@@ -812,8 +820,27 @@ export async function runFullDiscoveryPipeline(config = {}) {
 
     gate0PassedCount++;
 
-    // Pre-Classification Canonical Deduplication (Executed ONLY on candidates passing Gate 0)
-    const check = canonicalDeduplicator.checkUrlCandidate(rawItem);
+    // Raw Pool Capacity Limit (Candidate passed Gate 0, but pool is full)
+    if (rawCandidatePool.length >= maxRawLimit) {
+      rawPoolCapRejectedCount++;
+      droppedCandidates.push({
+        url: rawItem.url || rawItem.source_url,
+        title: rawItem.title,
+        source: rawItem.source,
+        gate: 'INGESTION',
+        rejection_reason: 'RAW_POOL_CAP_REACHED',
+        timestamp: rawItem.discovered_at || new Date().toISOString()
+      });
+      const stat = queryStatsMap.get(rawItem.search_query);
+      if (stat) {
+        stat.rejected++;
+        stat.rejectionReasons['RAW_POOL_CAP_REACHED'] = (stat.rejectionReasons['RAW_POOL_CAP_REACHED'] || 0) + 1;
+      }
+      return;
+    }
+
+    // Pre-Classification Canonical Deduplication with Full Query Context Preservation
+    const check = canonicalDeduplicator.checkUrlCandidate(rawItem, queryContext);
     if (check.isDuplicate) {
       droppedCandidates.push({
         url: rawItem.url || rawItem.source_url,
@@ -1027,13 +1054,16 @@ export async function runFullDiscoveryPipeline(config = {}) {
   const scoredCandidates = [];
 
   for (const item of rawCandidatePool) {
-    const meta = canonicalDeduplicator.getCandidateMetadata(item.canonicalUrl || item.url);
+    const meta = canonicalDeduplicator.getCandidateMetadata(item.canonicalUrl || item.url) || {};
+    item.query_count = meta.query_count || 1;
+    item.matched_queries = meta.matched_queries || [item.search_query || 'direct_source'];
+    item.distinct_clusters_count = meta.distinct_clusters_count || (meta.distinct_clusters ? meta.distinct_clusters.length : 1);
+    item.best_rank = meta.best_rank || item.rank || 1;
+
     let crossQueryBoost = 0;
-    if (meta) {
-      if (meta.query_count > 1) crossQueryBoost += 5;
-      if (meta.distinct_clusters_count > 1) crossQueryBoost += 5;
-      if (meta.best_rank <= 3) crossQueryBoost += 5;
-    }
+    if (meta.query_count > 1) crossQueryBoost += 5;
+    if (item.distinct_clusters_count > 1) crossQueryBoost += 5;
+    if (item.best_rank <= 3) crossQueryBoost += 5;
 
     const evalResult = scoreSearchResult(item, { ...item.queryContext, crossQueryBoost });
     item.preCrawlEval = evalResult;
@@ -1456,10 +1486,12 @@ export async function runFullDiscoveryPipeline(config = {}) {
     contactableProjects,
     persistence: persistenceResult,
     metrics: {
+      rawResultsReceived: totalRawResultsIngested,
       rawResults: totalRawResultsIngested || (dedupMetrics.rawResults - initialRawResults),
       cumulativeRawResults: dedupMetrics.rawResults,
       gate0Passed: gate0PassedCount,
       gate0Rejected: gate0RejectedCount,
+      rawPoolCapRejected: rawPoolCapRejectedCount,
       uniqueResults: totalEvaluated,
       linkHealthChecked,
       linkHealthPassed,
@@ -1475,6 +1507,7 @@ export async function runFullDiscoveryPipeline(config = {}) {
       candidateStates: candidateStateCounts,
       preFilterAccepted: totalPreFilterAccepted,
       preFilterRejected: totalPreFilterRejected,
+      verificationChecked: linkHealthChecked,
       crawlCapRejectedByQuery,
       deepCrawled: verifiedCandidatePool.length,
       extractionFailures,
@@ -1566,8 +1599,15 @@ export async function runProductionScaledDiscovery(options = {}) {
   const allContactableProjects = [];
   const aggregatedMetrics = {
     totalQueriesExecuted: 0,
+    rawResultsReceived: 0,
     rawResults: 0,
+    gate0Passed: 0,
+    gate0Rejected: 0,
+    rawPoolCapRejected: 0,
     uniqueResults: 0,
+    preFilterAccepted: 0,
+    preFilterRejected: 0,
+    verificationChecked: 0,
     linkHealthChecked: 0,
     linkHealthPassed: 0,
     linkHealthFailed: 0,
@@ -1635,8 +1675,15 @@ export async function runProductionScaledDiscovery(options = {}) {
 
     if (cycleRes.metrics) {
       aggregatedMetrics.totalQueriesExecuted += batchSize;
+      aggregatedMetrics.rawResultsReceived += cycleRes.metrics.rawResultsReceived || cycleRes.metrics.rawResults || 0;
       aggregatedMetrics.rawResults += cycleRes.metrics.rawResults || 0;
+      aggregatedMetrics.gate0Passed += cycleRes.metrics.gate0Passed || 0;
+      aggregatedMetrics.gate0Rejected += cycleRes.metrics.gate0Rejected || 0;
+      aggregatedMetrics.rawPoolCapRejected += cycleRes.metrics.rawPoolCapRejected || 0;
       aggregatedMetrics.uniqueResults += cycleRes.metrics.uniqueResults || 0;
+      aggregatedMetrics.preFilterAccepted += cycleRes.metrics.preFilterAccepted || 0;
+      aggregatedMetrics.preFilterRejected += cycleRes.metrics.preFilterRejected || 0;
+      aggregatedMetrics.verificationChecked += cycleRes.metrics.verificationChecked || cycleRes.metrics.linkHealthChecked || 0;
       aggregatedMetrics.linkHealthChecked += cycleRes.metrics.linkHealthChecked || 0;
       aggregatedMetrics.linkHealthPassed += cycleRes.metrics.linkHealthPassed || 0;
       aggregatedMetrics.linkHealthFailed += cycleRes.metrics.linkHealthFailed || 0;

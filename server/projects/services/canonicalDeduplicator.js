@@ -231,10 +231,11 @@ export class CanonicalDeduplicator {
 
     // First time seeing this candidate: initialize cross-query metadata
     const cluster = context.deliverableType || context.intentType || 'general';
+    const initialQuery = cand.search_query || context.search_query || 'direct_source';
     this.candidateMetadataMap.set(canonicalUrl, {
       canonicalUrl,
       canonicalId: sourceCanonicalId,
-      matched_queries: [cand.search_query || 'direct_source'],
+      matched_queries: [initialQuery],
       query_count: 1,
       best_rank: cand.rank || 1,
       distinct_clusters: new Set([cluster])
@@ -251,8 +252,9 @@ export class CanonicalDeduplicator {
     const meta = this.candidateMetadataMap.get(canonicalUrl);
     if (meta) {
       meta.query_count++;
-      if (cand.search_query && !meta.matched_queries.includes(cand.search_query)) {
-        meta.matched_queries.push(cand.search_query);
+      const queryStr = cand.search_query || queryContext?.search_query || cand.queryContext?.search_query;
+      if (queryStr && !meta.matched_queries.includes(queryStr)) {
+        meta.matched_queries.push(queryStr);
       }
       if (cand.rank && cand.rank < meta.best_rank) {
         meta.best_rank = cand.rank;
